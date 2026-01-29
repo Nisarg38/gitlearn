@@ -171,11 +171,19 @@ Output only the merged markdown."
         run: |
           PR_DIFF=$(gh pr diff ${{ github.event.pull_request.number }} --repo ${{ github.repository }} 2>/dev/null | head -c 10000 || echo "")
 
+          # Include existing context so AI doesn't repeat learnings
+          EXISTING=""
+          [ -f claude.md ] && EXISTING=$(head -100 claude.md)
+
           PROMPT="Based on this merged PR, suggest a 1-3 line addition for the project AI context file.
 
 Focus on: architectural decisions, conventions, gotchas, dependencies.
+DO NOT repeat anything already documented below.
 
 Output ONLY the markdown to append, or NONE if nothing worth documenting.
+
+EXISTING CONTEXT:
+$EXISTING
 
 PR: ${{ github.event.pull_request.title }}
 Description: ${{ github.event.pull_request.body }}
@@ -256,3 +264,24 @@ $PR_DIFF"
               --body "Auto-accumulated learnings from merged PRs. Review and merge when ready." \
               --head $BRANCH --base main --label "gitlearn" 2>/dev/null || \
             gh pr create --title "🤖 Context Updates" --body "Auto-accumulated learnings." --head $BRANCH --base main
+
+          # Job summary
+          echo "### 📚 gitlearn" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**PR #${{ github.event.pull_request.number }}**: ${{ github.event.pull_request.title }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo '${{ steps.learn.outputs.suggestion }}' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Summary (skipped)
+        if: steps.skip.outputs.skip == 'true'
+        run: |
+          echo "### ⏭️ gitlearn" >> $GITHUB_STEP_SUMMARY
+          echo "Skipped - PR has excluded label" >> $GITHUB_STEP_SUMMARY
+
+      - name: Summary (no learning)
+        if: steps.skip.outputs.skip != 'true' && (steps.learn.outputs.suggestion == 'NONE' || contains(steps.learn.outputs.suggestion, 'NONE'))
+        run: |
+          echo "### 📚 gitlearn" >> $GITHUB_STEP_SUMMARY
+          echo "No meaningful learning extracted from this PR." >> $GITHUB_STEP_SUMMARY
