@@ -263,45 +263,43 @@ Description: ${{ github.event.pull_request.body }}
           echo "$SUGGESTION" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Generate learning (weekly batch)
+      - name: Generate learning (weekly - process each PR)
         if: steps.skip.outputs.skip != 'true' && steps.collect.outputs.skip != 'true' && github.event_name != 'pull_request'
         id: learn_batch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Get full existing context
-          EXISTING_CLAUDE=""
-          [ -f claude.md ] && EXISTING_CLAUDE=$(cat claude.md)
-
-          # Build combined PR info from collected PRs
+          # Process each PR individually to maintain context-specific learnings
           PRS='${{ steps.collect.outputs.prs }}'
-          PR_SUMMARIES=""
           PR_NUMBERS=""
+          ALL_LEARNINGS=""
+          PROCESSED=0
+
+          # Limit to 5 most recent PRs
+          RECENT_PRS=$(echo "$PRS" | jq -c '[.[] | select(.number != null)] | sort_by(.number) | reverse | .[0:5]')
 
           while read -r pr; do
             [ -z "$pr" ] && continue
             NUM=$(echo "$pr" | jq -r '.number')
             TITLE=$(echo "$pr" | jq -r '.title')
-            BODY=$(echo "$pr" | jq -r '.body // ""' | head -c 500)
-            PR_DIFF=$(gh pr diff "$NUM" --repo ${{ github.repository }} 2>/dev/null | head -c 5000 || echo "")
-            PR_SUMMARIES="$PR_SUMMARIES
+            BODY=$(echo "$pr" | jq -r '.body // ""' | head -c 1000)
 
-### PR #$NUM: $TITLE
-$BODY
+            echo "Processing PR #$NUM: $TITLE"
 
-\`\`\`diff
-$PR_DIFF
-\`\`\`
-"
-            PR_NUMBERS="$PR_NUMBERS#$NUM "
-          done < <(echo "$PRS" | jq -c '.[]')
+            # Get diff for this specific PR
+            PR_DIFF=$(gh pr diff "$NUM" --repo ${{ github.repository }} 2>/dev/null | head -c 15000 || echo "")
 
-          echo "pr_numbers=$PR_NUMBERS" >> $GITHUB_OUTPUT
+            [ -z "$PR_DIFF" ] && continue
 
-          PROMPT='You are an expert at extracting valuable learnings from code changes for AI coding assistants.
+            # Get current context (including any learnings added in this run)
+            EXISTING_CLAUDE=""
+            [ -f claude.md ] && EXISTING_CLAUDE=$(cat claude.md)
+            EXISTING_CLAUDE="$EXISTING_CLAUDE$ALL_LEARNINGS"
+
+            PROMPT='You are an expert at extracting valuable learnings from code changes for AI coding assistants.
 
 ## Task
-Analyze these merged PRs from the past week and extract meaningful context (3-10 lines total) that would help an AI assistant working on this codebase in the future.
+Analyze this merged PR and extract 1-3 lines of context that would help an AI assistant working on this codebase in the future.
 
 ## What makes a GOOD learning:
 - Architectural decisions: "Uses event sourcing for order state"
@@ -310,7 +308,7 @@ Analyze these merged PRs from the past week and extract meaningful context (3-10
 - Important patterns: "Background jobs use BullMQ, see src/jobs/"
 - Integration details: "Stripe webhooks require signature verification in production"
 
-## What to SKIP:
+## What to SKIP (output NONE):
 - Obvious code changes (adding a button, fixing typos)
 - Version bumps or dependency updates
 - Test additions without architectural significance
@@ -318,46 +316,71 @@ Analyze these merged PRs from the past week and extract meaningful context (3-10
 - Documentation-only changes
 
 ## Format
-Output a markdown snippet with learnings. Group related learnings under ### headers if appropriate.
-If no meaningful learnings from any PR, output exactly: NONE
+Output a markdown snippet (1-3 lines, can include a ### header if starting new section).
+Or output exactly: NONE
 
 ## Existing Context (DO NOT REPEAT)
 '"$EXISTING_CLAUDE"'
 
-## PRs from this week
-'"$PR_SUMMARIES"
+## PR Details
+Title: '"$TITLE"'
+Description: '"$BODY"'
 
-          if [ "$PROVIDER" = "anthropic" ]; then
-            if [ -n "$THINKING" ] && [ "$THINKING" != "0" ]; then
-              REQUEST=$(jq -n --arg m "$MODEL" --arg p "$PROMPT" --argjson t "$THINKING" \
-                '{model:$m,max_tokens:16384,thinking:{type:"enabled",budget_tokens:$t},messages:[{role:"user",content:$p}]}')
+## Code Changes
+'"$PR_DIFF"
+
+            if [ "$PROVIDER" = "anthropic" ]; then
+              if [ -n "$THINKING" ] && [ "$THINKING" != "0" ]; then
+                REQUEST=$(jq -n --arg m "$MODEL" --arg p "$PROMPT" --argjson t "$THINKING" \
+                  '{model:$m,max_tokens:16384,thinking:{type:"enabled",budget_tokens:$t},messages:[{role:"user",content:$p}]}')
+              else
+                REQUEST=$(jq -n --arg m "$MODEL" --arg p "$PROMPT" --argjson mt "$MAX_TOKENS" \
+                  '{model:$m,max_tokens:$mt,messages:[{role:"user",content:$p}]}')
+              fi
+              RESPONSE=$(curl -sf https://api.anthropic.com/v1/messages \
+                -H "x-api-key: $API_KEY" -H "anthropic-version: 2023-06-01" -H "content-type: application/json" \
+                -d "$REQUEST" 2>&1) || { echo "Warning: API failed for PR #$NUM"; continue; }
+              SUGGESTION=$(echo "$RESPONSE" | jq -r '.content | map(select(.type=="text")) | .[0].text // "NONE"')
             else
+              case "$PROVIDER" in
+                openai) ENDPOINT="https://api.openai.com/v1/chat/completions" ;;
+                openrouter) ENDPOINT="https://openrouter.ai/api/v1/chat/completions" ;;
+                custom) ENDPOINT="${GITLEARN_API_BASE}/chat/completions" ;;
+              esac
               REQUEST=$(jq -n --arg m "$MODEL" --arg p "$PROMPT" --argjson mt "$MAX_TOKENS" \
                 '{model:$m,max_tokens:$mt,messages:[{role:"user",content:$p}]}')
+              RESPONSE=$(curl -sf "$ENDPOINT" \
+                -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+                -H "HTTP-Referer: https://github.com/${{ github.repository }}" \
+                -d "$REQUEST" 2>&1) || { echo "Warning: API failed for PR #$NUM"; continue; }
+              SUGGESTION=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "NONE"')
             fi
-            RESPONSE=$(curl -sf https://api.anthropic.com/v1/messages \
-              -H "x-api-key: $API_KEY" -H "anthropic-version: 2023-06-01" -H "content-type: application/json" \
-              -d "$REQUEST" 2>&1) || { echo "::error::API failed"; exit 1; }
-            SUGGESTION=$(echo "$RESPONSE" | jq -r '.content | map(select(.type=="text")) | .[0].text // "NONE"')
-          else
-            case "$PROVIDER" in
-              openai) ENDPOINT="https://api.openai.com/v1/chat/completions" ;;
-              openrouter) ENDPOINT="https://openrouter.ai/api/v1/chat/completions" ;;
-              custom) ENDPOINT="${GITLEARN_API_BASE}/chat/completions" ;;
-            esac
-            REQUEST=$(jq -n --arg m "$MODEL" --arg p "$PROMPT" --argjson mt "$MAX_TOKENS" \
-              '{model:$m,max_tokens:$mt,messages:[{role:"user",content:$p}]}')
-            RESPONSE=$(curl -sf "$ENDPOINT" \
-              -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
-              -H "HTTP-Referer: https://github.com/${{ github.repository }}" \
-              -d "$REQUEST" 2>&1) || { echo "::error::API failed"; exit 1; }
-            SUGGESTION=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "NONE"')
-          fi
 
-          [ -z "$SUGGESTION" ] && SUGGESTION="NONE"
-          echo "suggestion<<EOF" >> $GITHUB_OUTPUT
-          echo "$SUGGESTION" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+            # Skip if no meaningful learning
+            if [ -n "$SUGGESTION" ] && [ "$SUGGESTION" != "NONE" ] && ! echo "$SUGGESTION" | grep -qi "^NONE"; then
+              ALL_LEARNINGS="$ALL_LEARNINGS
+
+<!-- PR #$NUM -->
+$SUGGESTION"
+              PR_NUMBERS="$PR_NUMBERS#$NUM "
+              PROCESSED=$((PROCESSED + 1))
+              echo "✓ Extracted learning from PR #$NUM"
+            else
+              echo "⏭ No meaningful learning from PR #$NUM"
+            fi
+
+          done < <(echo "$RECENT_PRS" | jq -c '.[]')
+
+          echo "pr_numbers=$PR_NUMBERS" >> $GITHUB_OUTPUT
+          echo "processed=$PROCESSED" >> $GITHUB_OUTPUT
+
+          if [ -z "$ALL_LEARNINGS" ]; then
+            echo "suggestion=NONE" >> $GITHUB_OUTPUT
+          else
+            echo "suggestion<<EOF" >> $GITHUB_OUTPUT
+            echo "$ALL_LEARNINGS" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
 
       - name: Update context PR (single PR)
         if: steps.skip.outputs.skip != 'true' && github.event_name == 'pull_request' && steps.learn.outputs.suggestion != 'NONE' && !contains(steps.learn.outputs.suggestion, 'NONE')

@@ -6,9 +6,9 @@ gitlearn is a GitHub Action that learns from merged PRs and keeps your AI contex
 
 ## How It Works
 
-**Weekly Mode (default - saves tokens):**
+**Weekly Mode (recommended):**
 ```
-Week ends → AI analyzes all merged PRs → Extracts batch learnings → Opens PR for review → Assigns reviewer
+Week ends → AI analyzes last 5 PRs individually → Extracts PR-specific learnings → Opens PR for review → Assigns reviewer
 ```
 
 **Per-PR Mode (optional):**
@@ -17,7 +17,7 @@ PR merged → AI analyzes changes → Extracts learnings → Updates context fil
 ```
 
 gitlearn supports two trigger modes:
-1. **Weekly** (recommended): Processes all merged PRs once a week (Monday 9am UTC), saving API tokens
+1. **Weekly** (recommended): Processes last 5 PRs individually once a week (Monday 9am UTC), batching reviewer work while keeping PR-specific context
 2. **Per-PR**: Processes each PR immediately after merge
 
 When triggered, gitlearn:
@@ -93,7 +93,7 @@ gh variable set GITLEARN_TRIGGER_MODE --body "weekly"
 gh variable set GITLEARN_REVIEWER --body "your-github-username"
 ```
 
-This processes all merged PRs in a single batch every Monday at 9am UTC, significantly reducing API token usage compared to per-PR processing.
+This processes the last 5 merged PRs individually every Monday at 9am UTC. Each PR gets its own AI call for context-specific learnings, but reviewer work is batched into a single PR.
 
 ## What Gets Learned?
 
@@ -128,6 +128,45 @@ Add labels to skip learning:
 - `dependencies` - skipped by default
 - `chore` - skipped by default
 - Custom labels via `GITLEARN_SKIP_LABELS`
+
+## `/learn` Command
+
+Use gitlearn locally with AI coding assistants. The `/learn` command extracts learnings from recent PRs on-demand.
+
+**Supported tools:**
+- Claude Code (`.claude/commands/`)
+- Cursor (`.cursor/commands/`)
+- Windsurf (`.windsurf/commands/`)
+- Codex (`.codex/commands/`)
+
+### Install
+
+```bash
+# Copy command files to your repo
+mkdir -p .claude/commands .cursor/commands .windsurf/commands .codex/commands
+
+# Download the learn command
+curl -o .claude/commands/learn.md \
+  https://raw.githubusercontent.com/Nisarg38/gitlearn/main/.claude/commands/learn.md
+
+# Symlink for other tools
+ln -sf ../../.claude/commands/learn.md .cursor/commands/learn.md
+ln -sf ../../.claude/commands/learn.md .windsurf/commands/learn.md
+ln -sf ../../.claude/commands/learn.md .codex/commands/learn.md
+```
+
+### Usage
+
+```
+/learn          # Learn from last 5 merged PRs
+/learn #42      # Learn from specific PR
+```
+
+The command will:
+1. Fetch recent merged PRs
+2. Analyze each PR's diff against main
+3. Extract meaningful learnings
+4. Update `claude.md` and `agents.md`
 
 ## License
 
