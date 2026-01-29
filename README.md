@@ -6,15 +6,25 @@ gitlearn is a GitHub Action that learns from merged PRs and keeps your AI contex
 
 ## How It Works
 
+**Weekly Mode (default - saves tokens):**
+```
+Week ends → AI analyzes all merged PRs → Extracts batch learnings → Opens PR for review → Assigns reviewer
+```
+
+**Per-PR Mode (optional):**
 ```
 PR merged → AI analyzes changes → Extracts learnings → Updates context files → Opens PR for review
 ```
 
-When you merge a PR, gitlearn:
-1. Reads the diff and PR description
+gitlearn supports two trigger modes:
+1. **Weekly** (recommended): Processes all merged PRs once a week (Monday 9am UTC), saving API tokens
+2. **Per-PR**: Processes each PR immediately after merge
+
+When triggered, gitlearn:
+1. Collects PR diffs and descriptions
 2. Asks an AI to extract *meaningful* learnings (not obvious stuff)
 3. Appends insights to your `claude.md` file
-4. Batches updates into a single PR for you to review
+4. Creates a PR for review and optionally assigns a reviewer
 
 ## The Magic: `claude.md` ↔ `agents.md` Sync
 
@@ -63,11 +73,27 @@ All optional. Set these as repository variables:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `GITLEARN_TRIGGER_MODE` | `weekly` (batch) or `per-pr` (immediate) | `per-pr` with weekly also enabled |
+| `GITLEARN_REVIEWER` | GitHub username to assign as PR reviewer | - |
 | `GITLEARN_MODEL` | Override the AI model | Provider default |
 | `GITLEARN_MAX_TOKENS` | Response token limit | `2048` |
 | `GITLEARN_THINKING_BUDGET` | Anthropic thinking tokens | `10000` |
 | `GITLEARN_SKIP_LABELS` | PR labels to skip | `dependencies,chore` |
 | `GITLEARN_API_BASE` | Custom OpenAI-compatible endpoint | - |
+
+### Weekly Mode (Recommended for Token Savings)
+
+To use weekly-only mode and save API tokens:
+
+```bash
+# Set trigger mode to weekly-only
+gh variable set GITLEARN_TRIGGER_MODE --body "weekly"
+
+# Assign a reviewer for the weekly context PRs
+gh variable set GITLEARN_REVIEWER --body "your-github-username"
+```
+
+This processes all merged PRs in a single batch every Monday at 9am UTC, significantly reducing API token usage compared to per-PR processing.
 
 ## What Gets Learned?
 

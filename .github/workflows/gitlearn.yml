@@ -13,13 +13,22 @@
 name: gitlearn
 
 on:
+  # Weekly schedule - runs every Monday at 9am UTC (processes all merged PRs from the past week)
+  schedule:
+    - cron: '0 9 * * 1'
+  # Manual trigger for on-demand runs
+  workflow_dispatch:
+  # Per-PR trigger (optional - disable by setting GITLEARN_TRIGGER_MODE to 'weekly')
   pull_request:
     types: [closed]
     branches: [main, master]
 
 jobs:
   learn:
-    if: github.event.pull_request.merged == true
+    if: |
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true && vars.GITLEARN_TRIGGER_MODE != 'weekly')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -34,11 +43,18 @@ jobs:
       GITLEARN_THINKING_BUDGET: ${{ vars.GITLEARN_THINKING_BUDGET }}
       GITLEARN_API_BASE: ${{ vars.GITLEARN_API_BASE }}
       GITLEARN_SKIP_LABELS: ${{ vars.GITLEARN_SKIP_LABELS }}
+      GITLEARN_REVIEWER: ${{ vars.GITLEARN_REVIEWER }}
+      GITLEARN_TRIGGER_MODE: ${{ vars.GITLEARN_TRIGGER_MODE }}
 
     steps:
       - name: Check skip labels
         id: skip
         run: |
+          # Skip label check only applies to pull_request events
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "skip=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
           SKIP_LABELS="${GITLEARN_SKIP_LABELS:-dependencies,chore}"
           PR_LABELS='${{ toJson(github.event.pull_request.labels.*.name) }}'
           for label in ${SKIP_LABELS//,/ }; do
@@ -56,8 +72,47 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Collect merged PRs (scheduled run)
+        if: steps.skip.outputs.skip != 'true' && github.event_name != 'pull_request'
+        id: collect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Get merged PRs from the past 7 days
+          SINCE=$(date -d '7 days ago' -Iseconds 2>/dev/null || date -v-7d -Iseconds)
+          SKIP_LABELS="${GITLEARN_SKIP_LABELS:-dependencies,chore}"
+
+          echo "Collecting merged PRs since $SINCE..."
+
+          # Get merged PRs, filter out skipped labels
+          PRS=$(gh pr list --state merged --search "merged:>=$SINCE" --json number,title,body,labels --limit 50)
+
+          # Filter out PRs with skip labels
+          FILTERED_PRS=$(echo "$PRS" | jq -c --arg skip "$SKIP_LABELS" '
+            [.[] | select(
+              .labels as $labels |
+              ($skip | split(",")) as $skipList |
+              ($labels | map(.name) | map(. as $l | $skipList | map(. == $l) | any) | any) | not
+            )]
+          ')
+
+          PR_COUNT=$(echo "$FILTERED_PRS" | jq 'length')
+          echo "Found $PR_COUNT PRs to process"
+
+          if [ "$PR_COUNT" -eq "0" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "### 📚 gitlearn (weekly)" >> $GITHUB_STEP_SUMMARY
+            echo "No new PRs to learn from this week." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          echo "prs<<EOF" >> $GITHUB_OUTPUT
+          echo "$FILTERED_PRS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "skip=false" >> $GITHUB_OUTPUT
+
       - name: Configure
-        if: steps.skip.outputs.skip != 'true'
+        if: steps.skip.outputs.skip != 'true' && steps.collect.outputs.skip != 'true'
         run: |
           if [ -n "$GITLEARN_API_BASE" ]; then
             PROVIDER="custom"; API_KEY="${OPENAI_API_KEY:-${ANTHROPIC_API_KEY:-$OPENROUTER_API_KEY}}"
@@ -83,7 +138,7 @@ jobs:
           echo "API_KEY=$API_KEY" >> $GITHUB_ENV
 
       - name: Setup context files
-        if: steps.skip.outputs.skip != 'true'
+        if: steps.skip.outputs.skip != 'true' && steps.collect.outputs.skip != 'true'
         id: setup
         run: |
           if [ ! -f claude.md ] && [ ! -f agents.md ]; then
@@ -101,7 +156,7 @@ jobs:
           fi
 
       - name: Merge existing files
-        if: steps.skip.outputs.skip != 'true' && steps.setup.outputs.merge == 'true'
+        if: steps.skip.outputs.skip != 'true' && steps.collect.outputs.skip != 'true' && steps.setup.outputs.merge == 'true'
         run: |
           PROMPT="Merge these two AI context files into one. Remove duplicates, keep all unique information.
 
@@ -131,17 +186,15 @@ Output ONLY the merged markdown content."
           [ -n "$RESULT" ] && echo "$RESULT" > claude.md
           rm -f agents.md && ln -s claude.md agents.md
 
-      - name: Generate learning
-        if: steps.skip.outputs.skip != 'true'
+      - name: Generate learning (single PR)
+        if: steps.skip.outputs.skip != 'true' && github.event_name == 'pull_request'
         id: learn
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Get full existing context
           EXISTING_CLAUDE=""
-          EXISTING_AGENTS=""
           [ -f claude.md ] && EXISTING_CLAUDE=$(cat claude.md)
-          [ -f agents.md ] && [ ! -L agents.md ] && EXISTING_AGENTS=$(cat agents.md)
 
           PR_DIFF=$(gh pr diff ${{ github.event.pull_request.number }} --repo ${{ github.repository }} 2>/dev/null | head -c 15000 || echo "")
 
@@ -210,8 +263,104 @@ Description: ${{ github.event.pull_request.body }}
           echo "$SUGGESTION" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Update context PR
-        if: steps.skip.outputs.skip != 'true' && steps.learn.outputs.suggestion != 'NONE' && !contains(steps.learn.outputs.suggestion, 'NONE')
+      - name: Generate learning (weekly batch)
+        if: steps.skip.outputs.skip != 'true' && steps.collect.outputs.skip != 'true' && github.event_name != 'pull_request'
+        id: learn_batch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Get full existing context
+          EXISTING_CLAUDE=""
+          [ -f claude.md ] && EXISTING_CLAUDE=$(cat claude.md)
+
+          # Build combined PR info from collected PRs
+          PRS='${{ steps.collect.outputs.prs }}'
+          PR_SUMMARIES=""
+          PR_NUMBERS=""
+
+          while read -r pr; do
+            [ -z "$pr" ] && continue
+            NUM=$(echo "$pr" | jq -r '.number')
+            TITLE=$(echo "$pr" | jq -r '.title')
+            BODY=$(echo "$pr" | jq -r '.body // ""' | head -c 500)
+            PR_DIFF=$(gh pr diff "$NUM" --repo ${{ github.repository }} 2>/dev/null | head -c 5000 || echo "")
+            PR_SUMMARIES="$PR_SUMMARIES
+
+### PR #$NUM: $TITLE
+$BODY
+
+\`\`\`diff
+$PR_DIFF
+\`\`\`
+"
+            PR_NUMBERS="$PR_NUMBERS#$NUM "
+          done < <(echo "$PRS" | jq -c '.[]')
+
+          echo "pr_numbers=$PR_NUMBERS" >> $GITHUB_OUTPUT
+
+          PROMPT='You are an expert at extracting valuable learnings from code changes for AI coding assistants.
+
+## Task
+Analyze these merged PRs from the past week and extract meaningful context (3-10 lines total) that would help an AI assistant working on this codebase in the future.
+
+## What makes a GOOD learning:
+- Architectural decisions: "Uses event sourcing for order state"
+- Non-obvious conventions: "All API routes must use zod validation middleware"
+- Gotchas: "Redis keys expire after 24h - do not cache user sessions longer"
+- Important patterns: "Background jobs use BullMQ, see src/jobs/"
+- Integration details: "Stripe webhooks require signature verification in production"
+
+## What to SKIP:
+- Obvious code changes (adding a button, fixing typos)
+- Version bumps or dependency updates
+- Test additions without architectural significance
+- Refactoring that does not change behavior
+- Documentation-only changes
+
+## Format
+Output a markdown snippet with learnings. Group related learnings under ### headers if appropriate.
+If no meaningful learnings from any PR, output exactly: NONE
+
+## Existing Context (DO NOT REPEAT)
+'"$EXISTING_CLAUDE"'
+
+## PRs from this week
+'"$PR_SUMMARIES"
+
+          if [ "$PROVIDER" = "anthropic" ]; then
+            if [ -n "$THINKING" ] && [ "$THINKING" != "0" ]; then
+              REQUEST=$(jq -n --arg m "$MODEL" --arg p "$PROMPT" --argjson t "$THINKING" \
+                '{model:$m,max_tokens:16384,thinking:{type:"enabled",budget_tokens:$t},messages:[{role:"user",content:$p}]}')
+            else
+              REQUEST=$(jq -n --arg m "$MODEL" --arg p "$PROMPT" --argjson mt "$MAX_TOKENS" \
+                '{model:$m,max_tokens:$mt,messages:[{role:"user",content:$p}]}')
+            fi
+            RESPONSE=$(curl -sf https://api.anthropic.com/v1/messages \
+              -H "x-api-key: $API_KEY" -H "anthropic-version: 2023-06-01" -H "content-type: application/json" \
+              -d "$REQUEST" 2>&1) || { echo "::error::API failed"; exit 1; }
+            SUGGESTION=$(echo "$RESPONSE" | jq -r '.content | map(select(.type=="text")) | .[0].text // "NONE"')
+          else
+            case "$PROVIDER" in
+              openai) ENDPOINT="https://api.openai.com/v1/chat/completions" ;;
+              openrouter) ENDPOINT="https://openrouter.ai/api/v1/chat/completions" ;;
+              custom) ENDPOINT="${GITLEARN_API_BASE}/chat/completions" ;;
+            esac
+            REQUEST=$(jq -n --arg m "$MODEL" --arg p "$PROMPT" --argjson mt "$MAX_TOKENS" \
+              '{model:$m,max_tokens:$mt,messages:[{role:"user",content:$p}]}')
+            RESPONSE=$(curl -sf "$ENDPOINT" \
+              -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+              -H "HTTP-Referer: https://github.com/${{ github.repository }}" \
+              -d "$REQUEST" 2>&1) || { echo "::error::API failed"; exit 1; }
+            SUGGESTION=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "NONE"')
+          fi
+
+          [ -z "$SUGGESTION" ] && SUGGESTION="NONE"
+          echo "suggestion<<EOF" >> $GITHUB_OUTPUT
+          echo "$SUGGESTION" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Update context PR (single PR)
+        if: steps.skip.outputs.skip != 'true' && github.event_name == 'pull_request' && steps.learn.outputs.suggestion != 'NONE' && !contains(steps.learn.outputs.suggestion, 'NONE')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -256,11 +405,13 @@ Description: ${{ github.event.pull_request.body }}
             BRANCH="$NEW_BRANCH"
           fi
 
-          # Create PR if needed
+          # Create PR if needed (with optional reviewer)
           if ! gh pr list --head "$BRANCH" --state open --json number | jq -e '.[0]' >/dev/null 2>&1; then
+            REVIEWER_FLAG=""
+            [ -n "$GITLEARN_REVIEWER" ] && REVIEWER_FLAG="--reviewer $GITLEARN_REVIEWER"
             gh pr create --title "🤖 Context Updates" \
               --body "Auto-accumulated learnings from merged PRs. Review and merge when ready." \
-              --head "$BRANCH" --base main --label "gitlearn" 2>/dev/null || \
+              --head "$BRANCH" --base main --label "gitlearn" $REVIEWER_FLAG 2>/dev/null || \
             gh pr create --title "🤖 Context Updates" --body "Accumulated learnings." --head "$BRANCH" --base main
           fi
 
@@ -271,8 +422,76 @@ Description: ${{ github.event.pull_request.body }}
           echo '${{ steps.learn.outputs.suggestion }}' >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
-      - name: Summary (no learning)
-        if: steps.skip.outputs.skip != 'true' && (steps.learn.outputs.suggestion == 'NONE' || contains(steps.learn.outputs.suggestion, 'NONE'))
+      - name: Update context PR (weekly batch)
+        if: steps.skip.outputs.skip != 'true' && steps.collect.outputs.skip != 'true' && github.event_name != 'pull_request' && steps.learn_batch.outputs.suggestion != 'NONE' && !contains(steps.learn_batch.outputs.suggestion, 'NONE')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "gitlearn[bot]"
+          git config user.email "gitlearn[bot]@users.noreply.github.com"
+
+          # Create new branch for weekly batch
+          WEEK=$(date +%Y-W%V)
+          BRANCH="gitlearn/weekly-$WEEK"
+
+          # Check if branch already exists
+          if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
+            git fetch origin "$BRANCH"
+            git checkout "$BRANCH"
+            git pull origin "$BRANCH" --rebase || git pull origin "$BRANCH"
+          else
+            git checkout -b "$BRANCH"
+          fi
+
+          # Apply setup changes if any
+          [ "${{ steps.setup.outputs.changes }}" = "true" ] || [ "${{ steps.setup.outputs.merge }}" = "true" ] && git add claude.md agents.md 2>/dev/null || true
+
+          # Append learning with week marker
+          echo "" >> claude.md
+          echo "<!-- Weekly batch: $WEEK - PRs: ${{ steps.learn_batch.outputs.pr_numbers }} -->" >> claude.md
+          echo '${{ steps.learn_batch.outputs.suggestion }}' >> claude.md
+
+          git add claude.md agents.md
+          git commit -m "📚 Weekly learnings: $WEEK" || exit 0
+
+          # Push
+          git push origin "$BRANCH" -u || git push origin "$BRANCH" --force-with-lease
+
+          # Create or update PR with reviewer assignment
+          REVIEWER_FLAG=""
+          [ -n "$GITLEARN_REVIEWER" ] && REVIEWER_FLAG="--reviewer $GITLEARN_REVIEWER"
+
+          if ! gh pr list --head "$BRANCH" --state open --json number | jq -e '.[0]' >/dev/null 2>&1; then
+            gh pr create --title "🤖 Weekly Context Updates ($WEEK)" \
+              --body "Weekly batch of learnings from merged PRs. Review and merge when ready.
+
+**PRs included:** ${{ steps.learn_batch.outputs.pr_numbers }}" \
+              --head "$BRANCH" --base main --label "gitlearn" $REVIEWER_FLAG 2>/dev/null || \
+            gh pr create --title "🤖 Weekly Context Updates" --body "Weekly learnings batch." --head "$BRANCH" --base main
+          else
+            # Add reviewer to existing PR if configured
+            if [ -n "$GITLEARN_REVIEWER" ]; then
+              PR_NUM=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number')
+              gh pr edit "$PR_NUM" --add-reviewer "$GITLEARN_REVIEWER" 2>/dev/null || true
+            fi
+          fi
+
+          # Summary
+          echo "### 📚 gitlearn (weekly)" >> $GITHUB_STEP_SUMMARY
+          echo "**Week:** $WEEK" >> $GITHUB_STEP_SUMMARY
+          echo "**PRs processed:** ${{ steps.learn_batch.outputs.pr_numbers }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo '${{ steps.learn_batch.outputs.suggestion }}' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Summary (no learning - single PR)
+        if: steps.skip.outputs.skip != 'true' && github.event_name == 'pull_request' && (steps.learn.outputs.suggestion == 'NONE' || contains(steps.learn.outputs.suggestion, 'NONE'))
         run: |
           echo "### 📚 gitlearn" >> $GITHUB_STEP_SUMMARY
           echo "No meaningful learning from PR #${{ github.event.pull_request.number }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Summary (no learning - weekly)
+        if: steps.skip.outputs.skip != 'true' && steps.collect.outputs.skip != 'true' && github.event_name != 'pull_request' && (steps.learn_batch.outputs.suggestion == 'NONE' || contains(steps.learn_batch.outputs.suggestion, 'NONE'))
+        run: |
+          echo "### 📚 gitlearn (weekly)" >> $GITHUB_STEP_SUMMARY
+          echo "No meaningful learnings extracted from this week's PRs." >> $GITHUB_STEP_SUMMARY
