@@ -1,0 +1,307 @@
+# gitlearn - Learn from merged PRs and keep AI context files fresh
+# https://github.com/Nisarg38/gitlearn
+#
+# Setup (2 steps):
+#   mkdir -p .github/workflows && curl -o .github/workflows/gitlearn.yml https://raw.githubusercontent.com/Nisarg38/gitlearn/main/.github/workflows/gitlearn.yml
+#   gh secret set ANTHROPIC_API_KEY  # or OPENAI_API_KEY, OPENROUTER_API_KEY
+#
+# Auto-detects provider from your secret name. That's it!
+#
+# Advanced options (repository variables):
+#   GITLEARN_MODEL: Override default model
+#   GITLEARN_API_BASE: Custom endpoint (uses OpenAI-compatible format)
+
+name: gitlearn
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main, master]
+
+jobs:
+  learn:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    env:
+      # Standard API keys - just use the one you have
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      # Optional overrides
+      GITLEARN_MODEL: ${{ vars.GITLEARN_MODEL }}
+      GITLEARN_API_BASE: ${{ vars.GITLEARN_API_BASE }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect provider
+        id: provider
+        run: |
+          # Custom endpoint overrides provider detection
+          if [ -n "$GITLEARN_API_BASE" ]; then
+            # Use whichever key is available with custom endpoint
+            if [ -n "$OPENAI_API_KEY" ]; then
+              API_KEY="$OPENAI_API_KEY"
+            elif [ -n "$ANTHROPIC_API_KEY" ]; then
+              API_KEY="$ANTHROPIC_API_KEY"
+            elif [ -n "$OPENROUTER_API_KEY" ]; then
+              API_KEY="$OPENROUTER_API_KEY"
+            fi
+            echo "provider=custom" >> $GITHUB_OUTPUT
+            echo "api_key=$API_KEY" >> $GITHUB_OUTPUT
+            echo "model=${GITLEARN_MODEL:-gpt-4o}" >> $GITHUB_OUTPUT
+            echo "Using custom endpoint: $GITLEARN_API_BASE"
+          elif [ -n "$ANTHROPIC_API_KEY" ]; then
+            echo "provider=anthropic" >> $GITHUB_OUTPUT
+            echo "api_key=$ANTHROPIC_API_KEY" >> $GITHUB_OUTPUT
+            echo "model=${GITLEARN_MODEL:-claude-sonnet-4-20250514}" >> $GITHUB_OUTPUT
+            echo "Using Anthropic"
+          elif [ -n "$OPENAI_API_KEY" ]; then
+            echo "provider=openai" >> $GITHUB_OUTPUT
+            echo "api_key=$OPENAI_API_KEY" >> $GITHUB_OUTPUT
+            echo "model=${GITLEARN_MODEL:-gpt-4o}" >> $GITHUB_OUTPUT
+            echo "Using OpenAI"
+          elif [ -n "$OPENROUTER_API_KEY" ]; then
+            echo "provider=openrouter" >> $GITHUB_OUTPUT
+            echo "api_key=$OPENROUTER_API_KEY" >> $GITHUB_OUTPUT
+            echo "model=${GITLEARN_MODEL:-anthropic/claude-sonnet-4-20250514}" >> $GITHUB_OUTPUT
+            echo "Using OpenRouter"
+          else
+            echo "::error::No API key found. Add one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY"
+            exit 1
+          fi
+
+      - name: Setup context files
+        id: setup
+        run: |
+          CHANGES_MADE=false
+
+          # First-time setup: no context files exist
+          if [ ! -f claude.md ] && [ ! -f agents.md ]; then
+            cat > claude.md << 'EOF'
+# Project Context
+
+## Overview
+<!-- Add project description -->
+
+## Learnings
+EOF
+            ln -s claude.md agents.md
+            CHANGES_MADE=true
+            echo "Created initial claude.md and agents.md symlink"
+
+          # Only agents.md exists: rename to claude.md
+          elif [ ! -f claude.md ] && [ -f agents.md ]; then
+            mv agents.md claude.md
+            ln -s claude.md agents.md
+            CHANGES_MADE=true
+            echo "Renamed agents.md to claude.md, created symlink"
+
+          # Both exist but agents.md is not a symlink
+          elif [ -f agents.md ] && [ ! -L agents.md ]; then
+            echo "needs_merge=true" >> $GITHUB_OUTPUT
+            echo "Both files exist, need to merge"
+
+          # Only claude.md exists: create symlink
+          elif [ ! -e agents.md ]; then
+            ln -s claude.md agents.md
+            CHANGES_MADE=true
+            echo "Created agents.md symlink"
+          else
+            echo "Files already set up correctly"
+          fi
+
+          echo "changes_made=$CHANGES_MADE" >> $GITHUB_OUTPUT
+
+      - name: Merge existing files
+        if: steps.setup.outputs.needs_merge == 'true'
+        env:
+          API_KEY: ${{ steps.provider.outputs.api_key }}
+          PROVIDER: ${{ steps.provider.outputs.provider }}
+          MODEL: ${{ steps.provider.outputs.model }}
+        run: |
+          CLAUDE_CONTENT=$(cat claude.md)
+          AGENTS_CONTENT=$(cat agents.md)
+
+          PROMPT="Merge these AI context files. Dedupe, keep all unique info, preserve formatting.
+
+FILE 1 (claude.md):
+$CLAUDE_CONTENT
+
+FILE 2 (agents.md):
+$AGENTS_CONTENT
+
+Output only the merged markdown content, nothing else."
+
+          if [ "$PROVIDER" = "anthropic" ]; then
+            MERGED=$(curl -s https://api.anthropic.com/v1/messages \
+              -H "x-api-key: $API_KEY" \
+              -H "anthropic-version: 2023-06-01" \
+              -H "content-type: application/json" \
+              -d "$(jq -n --arg model "$MODEL" --arg prompt "$PROMPT" \
+                '{model: $model, max_tokens: 4096, messages: [{role: "user", content: $prompt}]}')" \
+              | jq -r '.content[0].text')
+          else
+            case "$PROVIDER" in
+              openai) ENDPOINT="https://api.openai.com/v1/chat/completions" ;;
+              openrouter) ENDPOINT="https://openrouter.ai/api/v1/chat/completions" ;;
+              custom) ENDPOINT="${GITLEARN_API_BASE}/chat/completions" ;;
+            esac
+
+            MERGED=$(curl -s "$ENDPOINT" \
+              -H "Authorization: Bearer $API_KEY" \
+              -H "Content-Type: application/json" \
+              -H "HTTP-Referer: https://github.com/${{ github.repository }}" \
+              -d "$(jq -n --arg model "$MODEL" --arg prompt "$PROMPT" \
+                '{model: $model, max_tokens: 4096, messages: [{role: "user", content: $prompt}]}')" \
+              | jq -r '.choices[0].message.content')
+          fi
+
+          if [ -n "$MERGED" ] && [ "$MERGED" != "null" ]; then
+            echo "$MERGED" > claude.md
+            rm agents.md
+            ln -s claude.md agents.md
+            echo "Successfully merged files"
+          else
+            echo "Warning: Merge failed, keeping original claude.md"
+            rm agents.md
+            ln -s claude.md agents.md
+          fi
+
+      - name: Generate learning
+        id: learn
+        env:
+          API_KEY: ${{ steps.provider.outputs.api_key }}
+          PROVIDER: ${{ steps.provider.outputs.provider }}
+          MODEL: ${{ steps.provider.outputs.model }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUM="${{ github.event.pull_request.number }}"
+          PR_DIFF=$(gh pr diff $PR_NUM --repo ${{ github.repository }} 2>/dev/null | head -c 10000 || echo "Diff unavailable")
+
+          # Build prompt with proper escaping
+          PROMPT=$(cat << 'PROMPT_EOF'
+Based on this merged PR, suggest a 1-3 line addition for the project AI context file. Focus on:
+- Architectural decisions
+- Code conventions or patterns
+- Gotchas or edge cases future devs should know
+- Important dependencies or configurations
+
+Output ONLY the markdown snippet to append (can include a header if needed), or output exactly NONE if there's no meaningful learning worth documenting.
+
+PROMPT_EOF
+)
+          PROMPT="$PROMPT
+PR Title: ${{ github.event.pull_request.title }}
+
+PR Description:
+${{ github.event.pull_request.body }}
+
+Code Changes:
+$PR_DIFF"
+
+          if [ "$PROVIDER" = "anthropic" ]; then
+            SUGGESTION=$(curl -s https://api.anthropic.com/v1/messages \
+              -H "x-api-key: $API_KEY" \
+              -H "anthropic-version: 2023-06-01" \
+              -H "content-type: application/json" \
+              -d "$(jq -n --arg model "$MODEL" --arg prompt "$PROMPT" \
+                '{model: $model, max_tokens: 512, messages: [{role: "user", content: $prompt}]}')" \
+              | jq -r '.content[0].text')
+          else
+            case "$PROVIDER" in
+              openai) ENDPOINT="https://api.openai.com/v1/chat/completions" ;;
+              openrouter) ENDPOINT="https://openrouter.ai/api/v1/chat/completions" ;;
+              custom) ENDPOINT="${GITLEARN_API_BASE}/chat/completions" ;;
+            esac
+
+            SUGGESTION=$(curl -s "$ENDPOINT" \
+              -H "Authorization: Bearer $API_KEY" \
+              -H "Content-Type: application/json" \
+              -H "HTTP-Referer: https://github.com/${{ github.repository }}" \
+              -d "$(jq -n --arg model "$MODEL" --arg prompt "$PROMPT" \
+                '{model: $model, max_tokens: 512, messages: [{role: "user", content: $prompt}]}')" \
+              | jq -r '.choices[0].message.content')
+          fi
+
+          # Handle empty or error responses
+          if [ -z "$SUGGESTION" ] || [ "$SUGGESTION" = "null" ]; then
+            SUGGESTION="NONE"
+          fi
+
+          echo "suggestion<<EOF" >> $GITHUB_OUTPUT
+          echo "$SUGGESTION" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Update context PR
+        if: steps.learn.outputs.suggestion != 'NONE' && !contains(steps.learn.outputs.suggestion, 'NONE')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="gitlearn/context-updates"
+
+          git config user.name "gitlearn[bot]"
+          git config user.email "gitlearn[bot]@users.noreply.github.com"
+
+          # Checkout or create branch
+          if git ls-remote --exit-code --heads origin $BRANCH 2>/dev/null; then
+            git fetch origin $BRANCH
+            git checkout $BRANCH
+            git rebase origin/main || { git rebase --abort 2>/dev/null; git reset --hard origin/main; }
+          else
+            git checkout -b $BRANCH
+          fi
+
+          # Ensure setup changes are included
+          if [ "${{ steps.setup.outputs.changes_made }}" = "true" ] || [ "${{ steps.setup.outputs.needs_merge }}" = "true" ]; then
+            git add claude.md agents.md 2>/dev/null || true
+          fi
+
+          # Append learning with metadata comment
+          echo "" >> claude.md
+          echo "<!-- PR #${{ github.event.pull_request.number }} - $(date +%Y-%m-%d) -->" >> claude.md
+          echo '${{ steps.learn.outputs.suggestion }}' >> claude.md
+
+          git add claude.md agents.md
+          git commit -m "📚 #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}" || {
+            echo "No changes to commit"
+            exit 0
+          }
+
+          git push origin $BRANCH --force-with-lease
+
+          # Create PR if one doesn't exist
+          if ! gh pr list --head $BRANCH --state open --json number | jq -e '.[0]' >/dev/null 2>&1; then
+            gh pr create \
+              --title "🤖 Context Updates" \
+              --body "$(cat << 'PR_BODY'
+Auto-accumulated learnings from merged PRs.
+
+This PR is automatically updated each time a PR is merged. Review the changes to ensure quality context documentation.
+
+**How it works:**
+- Each merged PR is analyzed for architectural decisions, conventions, and gotchas
+- Learnings are appended to `claude.md` (with `agents.md` as a symlink)
+- Merge this PR when you're ready to update your AI context files
+
+---
+*Powered by [gitlearn](https://github.com/Nisarg38/gitlearn)*
+PR_BODY
+)" \
+              --head $BRANCH \
+              --base main \
+              --label "gitlearn" 2>/dev/null || \
+            gh pr create \
+              --title "🤖 Context Updates" \
+              --body "Auto-accumulated learnings from merged PRs." \
+              --head $BRANCH \
+              --base main
+          fi
+
+          echo "✅ Context PR updated successfully"
