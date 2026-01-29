@@ -9,13 +9,6 @@
 #   Anthropic: claude-sonnet-4-5-20250929 (extended thinking)
 #   OpenAI: gpt-5.2-codex
 #   OpenRouter: moonshotai/kimi-k2.5
-#
-# Configuration (repository variables):
-#   GITLEARN_MODEL: Override model
-#   GITLEARN_MAX_TOKENS: Max output tokens (default: 1024)
-#   GITLEARN_THINKING_BUDGET: Claude thinking tokens (default: 10000, set to 0 to disable)
-#   GITLEARN_API_BASE: Custom OpenAI-compatible endpoint
-#   GITLEARN_SKIP_LABELS: Comma-separated labels to skip (default: dependencies,chore)
 
 name: gitlearn
 
@@ -48,11 +41,11 @@ jobs:
         run: |
           SKIP_LABELS="${GITLEARN_SKIP_LABELS:-dependencies,chore}"
           PR_LABELS='${{ toJson(github.event.pull_request.labels.*.name) }}'
-
           for label in ${SKIP_LABELS//,/ }; do
             if echo "$PR_LABELS" | grep -qi "\"$label\""; then
-              echo "Skipping: PR has label '$label'"
               echo "skip=true" >> $GITHUB_OUTPUT
+              echo "### ⏭️ gitlearn" >> $GITHUB_STEP_SUMMARY
+              echo "Skipped - PR has label: $label" >> $GITHUB_STEP_SUMMARY
               exit 0
             fi
           done
@@ -65,64 +58,40 @@ jobs:
 
       - name: Configure
         if: steps.skip.outputs.skip != 'true'
-        id: config
         run: |
-          # Detect provider and set defaults
           if [ -n "$GITLEARN_API_BASE" ]; then
-            PROVIDER="custom"
-            API_KEY="${OPENAI_API_KEY:-${ANTHROPIC_API_KEY:-$OPENROUTER_API_KEY}}"
-            MODEL="${GITLEARN_MODEL:-gpt-4o}"
-            THINKING=""
+            PROVIDER="custom"; API_KEY="${OPENAI_API_KEY:-${ANTHROPIC_API_KEY:-$OPENROUTER_API_KEY}}"
+            MODEL="${GITLEARN_MODEL:-gpt-4o}"; THINKING=""
           elif [ -n "$ANTHROPIC_API_KEY" ]; then
-            PROVIDER="anthropic"
-            API_KEY="$ANTHROPIC_API_KEY"
-            MODEL="${GITLEARN_MODEL:-claude-sonnet-4-5-20250929}"
-            THINKING="${GITLEARN_THINKING_BUDGET:-10000}"
+            PROVIDER="anthropic"; API_KEY="$ANTHROPIC_API_KEY"
+            MODEL="${GITLEARN_MODEL:-claude-sonnet-4-5-20250929}"; THINKING="${GITLEARN_THINKING_BUDGET:-10000}"
           elif [ -n "$OPENAI_API_KEY" ]; then
-            PROVIDER="openai"
-            API_KEY="$OPENAI_API_KEY"
-            MODEL="${GITLEARN_MODEL:-gpt-5.2-codex}"
-            THINKING=""
+            PROVIDER="openai"; API_KEY="$OPENAI_API_KEY"
+            MODEL="${GITLEARN_MODEL:-gpt-5.2-codex}"; THINKING=""
           elif [ -n "$OPENROUTER_API_KEY" ]; then
-            PROVIDER="openrouter"
-            API_KEY="$OPENROUTER_API_KEY"
-            MODEL="${GITLEARN_MODEL:-moonshotai/kimi-k2.5}"
-            THINKING=""
+            PROVIDER="openrouter"; API_KEY="$OPENROUTER_API_KEY"
+            MODEL="${GITLEARN_MODEL:-moonshotai/kimi-k2.5}"; THINKING=""
           else
-            echo "::error::No API key found. Add ANTHROPIC_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY"
+            echo "::error::No API key. Add ANTHROPIC_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY"
             exit 1
           fi
-
-          # Export to env file (more secure than GITHUB_OUTPUT for secrets)
           echo "PROVIDER=$PROVIDER" >> $GITHUB_ENV
           echo "MODEL=$MODEL" >> $GITHUB_ENV
           echo "THINKING=$THINKING" >> $GITHUB_ENV
-          echo "MAX_TOKENS=${GITLEARN_MAX_TOKENS:-1024}" >> $GITHUB_ENV
-
-          # Mask and export API key
+          echo "MAX_TOKENS=${GITLEARN_MAX_TOKENS:-2048}" >> $GITHUB_ENV
           echo "::add-mask::$API_KEY"
           echo "API_KEY=$API_KEY" >> $GITHUB_ENV
-
-          echo "Using $PROVIDER with $MODEL"
 
       - name: Setup context files
         if: steps.skip.outputs.skip != 'true'
         id: setup
         run: |
           if [ ! -f claude.md ] && [ ! -f agents.md ]; then
-            cat > claude.md << 'EOF'
-# Project Context
-
-## Overview
-<!-- Add project description -->
-
-## Learnings
-EOF
+            echo -e "# Project Context\n\n## Learnings" > claude.md
             ln -s claude.md agents.md
             echo "changes=true" >> $GITHUB_OUTPUT
           elif [ ! -f claude.md ] && [ -f agents.md ]; then
-            mv agents.md claude.md
-            ln -s claude.md agents.md
+            mv agents.md claude.md && ln -s claude.md agents.md
             echo "changes=true" >> $GITHUB_OUTPUT
           elif [ -f agents.md ] && [ ! -L agents.md ]; then
             echo "merge=true" >> $GITHUB_OUTPUT
@@ -134,18 +103,18 @@ EOF
       - name: Merge existing files
         if: steps.skip.outputs.skip != 'true' && steps.setup.outputs.merge == 'true'
         run: |
-          PROMPT="Merge these AI context files. Dedupe, preserve all unique info.
+          PROMPT="Merge these two AI context files into one. Remove duplicates, keep all unique information.
 
-FILE 1 (claude.md):
+=== claude.md ===
 $(cat claude.md)
 
-FILE 2 (agents.md):
+=== agents.md ===
 $(cat agents.md)
 
-Output only the merged markdown."
+Output ONLY the merged markdown content."
 
           if [ "$PROVIDER" = "anthropic" ]; then
-            REQUEST=$(jq -n --arg m "$MODEL" --arg p "$PROMPT" '{model:$m,max_tokens:4096,messages:[{role:"user",content:$p}]}')
+            REQUEST=$(jq -n --arg m "$MODEL" --arg p "$PROMPT" '{model:$m,max_tokens:8192,messages:[{role:"user",content:$p}]}')
             RESULT=$(curl -sf https://api.anthropic.com/v1/messages \
               -H "x-api-key: $API_KEY" -H "anthropic-version: 2023-06-01" -H "content-type: application/json" \
               -d "$REQUEST" | jq -r '.content | map(select(.type=="text")) | .[0].text // empty')
@@ -155,11 +124,10 @@ Output only the merged markdown."
               openrouter) EP="https://openrouter.ai/api/v1/chat/completions" ;;
               custom) EP="${GITLEARN_API_BASE}/chat/completions" ;;
             esac
-            REQUEST=$(jq -n --arg m "$MODEL" --arg p "$PROMPT" '{model:$m,max_tokens:4096,messages:[{role:"user",content:$p}]}')
+            REQUEST=$(jq -n --arg m "$MODEL" --arg p "$PROMPT" '{model:$m,max_tokens:8192,messages:[{role:"user",content:$p}]}')
             RESULT=$(curl -sf "$EP" -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
               -d "$REQUEST" | jq -r '.choices[0].message.content // empty')
           fi
-
           [ -n "$RESULT" ] && echo "$RESULT" > claude.md
           rm -f agents.md && ln -s claude.md agents.md
 
@@ -169,28 +137,47 @@ Output only the merged markdown."
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PR_DIFF=$(gh pr diff ${{ github.event.pull_request.number }} --repo ${{ github.repository }} 2>/dev/null | head -c 10000 || echo "")
+          # Get full existing context
+          EXISTING_CLAUDE=""
+          EXISTING_AGENTS=""
+          [ -f claude.md ] && EXISTING_CLAUDE=$(cat claude.md)
+          [ -f agents.md ] && [ ! -L agents.md ] && EXISTING_AGENTS=$(cat agents.md)
 
-          # Include existing context so AI doesn't repeat learnings
-          EXISTING=""
-          [ -f claude.md ] && EXISTING=$(head -100 claude.md)
+          PR_DIFF=$(gh pr diff ${{ github.event.pull_request.number }} --repo ${{ github.repository }} 2>/dev/null | head -c 15000 || echo "")
 
-          PROMPT="Based on this merged PR, suggest a 1-3 line addition for the project AI context file.
+          PROMPT='You are an expert at extracting valuable learnings from code changes for AI coding assistants.
 
-Focus on: architectural decisions, conventions, gotchas, dependencies.
-DO NOT repeat anything already documented below.
+## Task
+Analyze this merged PR and extract 1-3 lines of context that would help an AI assistant working on this codebase in the future.
 
-Output ONLY the markdown to append, or NONE if nothing worth documenting.
+## What makes a GOOD learning:
+- Architectural decisions: "Uses event sourcing for order state"
+- Non-obvious conventions: "All API routes must use zod validation middleware"
+- Gotchas: "Redis keys expire after 24h - do not cache user sessions longer"
+- Important patterns: "Background jobs use BullMQ, see src/jobs/"
+- Integration details: "Stripe webhooks require signature verification in production"
 
-EXISTING CONTEXT:
-$EXISTING
+## What to SKIP (output NONE):
+- Obvious code changes (adding a button, fixing typos)
+- Version bumps or dependency updates
+- Test additions without architectural significance
+- Refactoring that does not change behavior
+- Documentation-only changes
 
-PR: ${{ github.event.pull_request.title }}
+## Format
+Output a markdown snippet (1-3 lines, can include a ### header if starting new section).
+Or output exactly: NONE
+
+## Existing Context (DO NOT REPEAT)
+'"$EXISTING_CLAUDE"'
+
+## PR Details
+Title: ${{ github.event.pull_request.title }}
 Description: ${{ github.event.pull_request.body }}
-Diff:
-$PR_DIFF"
 
-          # Call API based on provider
+## Code Changes
+'"$PR_DIFF"
+
           if [ "$PROVIDER" = "anthropic" ]; then
             if [ -n "$THINKING" ] && [ "$THINKING" != "0" ]; then
               REQUEST=$(jq -n --arg m "$MODEL" --arg p "$PROMPT" --argjson t "$THINKING" \
@@ -199,13 +186,9 @@ $PR_DIFF"
               REQUEST=$(jq -n --arg m "$MODEL" --arg p "$PROMPT" --argjson mt "$MAX_TOKENS" \
                 '{model:$m,max_tokens:$mt,messages:[{role:"user",content:$p}]}')
             fi
-
             RESPONSE=$(curl -sf https://api.anthropic.com/v1/messages \
-              -H "x-api-key: $API_KEY" \
-              -H "anthropic-version: 2023-06-01" \
-              -H "content-type: application/json" \
-              -d "$REQUEST" 2>&1) || { echo "::error::Anthropic API failed: $RESPONSE"; exit 1; }
-
+              -H "x-api-key: $API_KEY" -H "anthropic-version: 2023-06-01" -H "content-type: application/json" \
+              -d "$REQUEST" 2>&1) || { echo "::error::API failed"; exit 1; }
             SUGGESTION=$(echo "$RESPONSE" | jq -r '.content | map(select(.type=="text")) | .[0].text // "NONE"')
           else
             case "$PROVIDER" in
@@ -213,21 +196,16 @@ $PR_DIFF"
               openrouter) ENDPOINT="https://openrouter.ai/api/v1/chat/completions" ;;
               custom) ENDPOINT="${GITLEARN_API_BASE}/chat/completions" ;;
             esac
-
             REQUEST=$(jq -n --arg m "$MODEL" --arg p "$PROMPT" --argjson mt "$MAX_TOKENS" \
               '{model:$m,max_tokens:$mt,messages:[{role:"user",content:$p}]}')
-
             RESPONSE=$(curl -sf "$ENDPOINT" \
-              -H "Authorization: Bearer $API_KEY" \
-              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
               -H "HTTP-Referer: https://github.com/${{ github.repository }}" \
-              -d "$REQUEST" 2>&1) || { echo "::error::API failed: $RESPONSE"; exit 1; }
-
+              -d "$REQUEST" 2>&1) || { echo "::error::API failed"; exit 1; }
             SUGGESTION=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "NONE"')
           fi
 
           [ -z "$SUGGESTION" ] && SUGGESTION="NONE"
-
           echo "suggestion<<EOF" >> $GITHUB_OUTPUT
           echo "$SUGGESTION" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
@@ -237,51 +215,64 @@ $PR_DIFF"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          BRANCH="gitlearn/context-updates"
           git config user.name "gitlearn[bot]"
           git config user.email "gitlearn[bot]@users.noreply.github.com"
 
-          if git ls-remote --exit-code --heads origin $BRANCH 2>/dev/null; then
-            git fetch origin $BRANCH
-            git checkout $BRANCH
-            git rebase origin/main 2>/dev/null || git reset --hard origin/main
+          # Find existing open gitlearn PR
+          EXISTING_PR=$(gh pr list --state open --json number,headRefName --jq '.[] | select(.headRefName | startswith("gitlearn/")) | .headRefName' | head -1)
+
+          if [ -n "$EXISTING_PR" ]; then
+            # Append to existing PR branch
+            BRANCH="$EXISTING_PR"
+            git fetch origin "$BRANCH"
+            git checkout "$BRANCH"
+            git pull origin "$BRANCH" --rebase || git pull origin "$BRANCH"
           else
-            git checkout -b $BRANCH
+            # Create new branch with incrementing number
+            LAST_NUM=$(git branch -r | grep -oE 'gitlearn/context-[0-9]+' | grep -oE '[0-9]+' | sort -n | tail -1)
+            NEXT_NUM=$((${LAST_NUM:-0} + 1))
+            BRANCH="gitlearn/context-$NEXT_NUM"
+            git checkout -b "$BRANCH"
           fi
 
+          # Apply setup changes if any
           [ "${{ steps.setup.outputs.changes }}" = "true" ] || [ "${{ steps.setup.outputs.merge }}" = "true" ] && git add claude.md agents.md 2>/dev/null || true
 
+          # Append learning
           echo "" >> claude.md
           echo "<!-- PR #${{ github.event.pull_request.number }} -->" >> claude.md
           echo '${{ steps.learn.outputs.suggestion }}' >> claude.md
 
           git add claude.md agents.md
           git commit -m "📚 #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}" || exit 0
-          git push origin $BRANCH --force-with-lease
 
-          gh pr list --head $BRANCH --state open --json number | jq -e '.[0]' >/dev/null 2>&1 || \
+          # Push (retry with new branch if conflict)
+          if ! git push origin "$BRANCH" 2>/dev/null; then
+            LAST_NUM=$(git branch -r | grep -oE 'gitlearn/context-[0-9]+' | grep -oE '[0-9]+' | sort -n | tail -1)
+            NEXT_NUM=$((${LAST_NUM:-0} + 1))
+            NEW_BRANCH="gitlearn/context-$NEXT_NUM"
+            git checkout -b "$NEW_BRANCH"
+            git push origin "$NEW_BRANCH"
+            BRANCH="$NEW_BRANCH"
+          fi
+
+          # Create PR if needed
+          if ! gh pr list --head "$BRANCH" --state open --json number | jq -e '.[0]' >/dev/null 2>&1; then
             gh pr create --title "🤖 Context Updates" \
               --body "Auto-accumulated learnings from merged PRs. Review and merge when ready." \
-              --head $BRANCH --base main --label "gitlearn" 2>/dev/null || \
-            gh pr create --title "🤖 Context Updates" --body "Auto-accumulated learnings." --head $BRANCH --base main
+              --head "$BRANCH" --base main --label "gitlearn" 2>/dev/null || \
+            gh pr create --title "🤖 Context Updates" --body "Accumulated learnings." --head "$BRANCH" --base main
+          fi
 
-          # Job summary
+          # Summary
           echo "### 📚 gitlearn" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
           echo "**PR #${{ github.event.pull_request.number }}**: ${{ github.event.pull_request.title }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo '${{ steps.learn.outputs.suggestion }}' >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-
-      - name: Summary (skipped)
-        if: steps.skip.outputs.skip == 'true'
-        run: |
-          echo "### ⏭️ gitlearn" >> $GITHUB_STEP_SUMMARY
-          echo "Skipped - PR has excluded label" >> $GITHUB_STEP_SUMMARY
 
       - name: Summary (no learning)
         if: steps.skip.outputs.skip != 'true' && (steps.learn.outputs.suggestion == 'NONE' || contains(steps.learn.outputs.suggestion, 'NONE'))
         run: |
           echo "### 📚 gitlearn" >> $GITHUB_STEP_SUMMARY
-          echo "No meaningful learning extracted from this PR." >> $GITHUB_STEP_SUMMARY
+          echo "No meaningful learning from PR #${{ github.event.pull_request.number }}" >> $GITHUB_STEP_SUMMARY
