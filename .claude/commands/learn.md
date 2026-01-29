@@ -1,68 +1,96 @@
-# /learn - Extract learnings from recent PRs
+# /learn - Discover repo-specific context
 
-Analyze recent merged PRs and extract valuable context for AI assistants.
+Explore this codebase and extract valuable context for AI assistants.
 
 ## Instructions
 
-You are gitlearn - an AI that extracts meaningful learnings from code changes.
+You are gitlearn - an AI that discovers meaningful patterns and conventions in codebases.
 
-### Step 1: Get Recent Merged PRs
+### What to Look For
 
-Run this command to get the last 5 merged PRs:
+Explore the codebase to find:
 
-```bash
-gh pr list --state merged --limit 5 --json number,title,body
-```
+1. **Architectural Decisions**
+   - How is the project structured? (monorepo, feature-based, layer-based)
+   - What patterns are used? (MVC, event sourcing, CQRS, etc.)
+   - How do services communicate?
 
-### Step 2: For Each PR, Get the Diff
+2. **Coding Standards & Conventions**
+   - Naming conventions (files, functions, variables)
+   - Error handling patterns
+   - Logging practices
+   - Testing conventions
 
-For each PR number, get the diff against main:
+3. **Repo-Specific Utilities**
+   - Custom helper functions that should be reused
+   - Shared components or modules
+   - Internal APIs or abstractions
 
-```bash
-gh pr diff <PR_NUMBER>
-```
+4. **Non-Obvious Gotchas**
+   - Environment-specific behavior
+   - Cache expiration rules
+   - Rate limits or quotas
+   - Security requirements (auth, validation)
 
-### Step 3: Extract Learnings
+5. **Integration Details**
+   - Third-party services and how they're configured
+   - API patterns (REST, GraphQL, etc.)
+   - Database conventions
 
-For each PR, analyze the diff and extract 1-3 lines of valuable context. Focus on:
+### How to Explore
 
-**Good learnings:**
-- Architectural decisions: "Uses event sourcing for order state"
-- Non-obvious conventions: "All API routes must use zod validation middleware"
-- Gotchas: "Redis keys expire after 24h - do not cache user sessions longer"
-- Important patterns: "Background jobs use BullMQ, see src/jobs/"
-- Integration details: "Stripe webhooks require signature verification in production"
+1. Check the project structure:
+   - Look at `package.json`, `pyproject.toml`, `Cargo.toml`, etc.
+   - Examine the folder structure
+   - Read any existing documentation
 
-**Skip (no learning needed):**
-- Obvious code changes (adding a button, fixing typos)
-- Version bumps or dependency updates
-- Test additions without architectural significance
-- Refactoring that doesn't change behavior
-- Documentation-only changes
+2. Sample key files:
+   - Entry points (main, index, app)
+   - Configuration files
+   - A few representative modules
 
-### Step 4: Update Context Files
+3. Look for patterns:
+   - How are similar things done across the codebase?
+   - What abstractions exist?
 
-1. Read the current `claude.md` file (create if it doesn't exist)
-2. Check what's already documented (don't repeat)
-3. Append new learnings with PR reference comments
-4. Ensure `agents.md` is symlinked to `claude.md`
+### Update Context Files (ONLY IF NEEDED)
 
-Format for appending:
+After exploring, decide if there's anything **worth documenting** that isn't already in `claude.md`.
+
+**Good additions:**
+- "All API routes are in `src/routes/` and must use the `validateRequest` middleware"
+- "Use `libs/logger.ts` for logging - never use console.log directly"
+- "Database migrations are in `prisma/migrations/` - run `pnpm db:migrate` after changes"
+- "Feature flags are managed via LaunchDarkly - see `src/flags/` for usage"
+
+**Don't add:**
+- Obvious things (it's a React app, uses TypeScript)
+- Things already documented
+- Generic best practices not specific to this repo
+
+### If Updating
+
+1. Read current `claude.md` (create with `# Project Context` header if missing)
+2. Add new insights under appropriate sections
+3. Ensure `agents.md` is symlinked: `ln -sf claude.md agents.md`
+
+Format:
 ```markdown
-
-<!-- PR #123 -->
-### Section Header (if starting new topic)
-- Learning point here
+### Section Name
+- Specific insight about this repo
+- Another insight
 ```
 
-### Step 5: Summary
+### Success Criteria
 
-After updating, show:
-- Which PRs were processed
-- What learnings were extracted
-- Confirmation that files were updated
+**It's successful if you:**
+- Explored the codebase thoughtfully
+- Found meaningful patterns (or confirmed there's nothing non-obvious to add)
+- Updated files only if there was genuine value to add
+
+**No update needed?** That's fine! Say "Explored the codebase - nothing non-obvious to add that isn't already documented."
 
 ## Arguments
 
-- No args: Process last 5 merged PRs
-- `$ARGUMENTS`: If a PR number is provided (e.g., `#42` or `42`), process only that PR
+- No args: General codebase exploration
+- `$ARGUMENTS`: Focus area (e.g., "auth", "database", "api patterns")

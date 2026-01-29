@@ -131,7 +131,7 @@ Add labels to skip learning:
 
 ## `/learn` Command
 
-Use gitlearn locally with AI coding assistants. The `/learn` command extracts learnings from recent PRs on-demand.
+Use gitlearn locally with AI coding assistants. The `/learn` command explores your codebase to discover repo-specific context.
 
 **Supported tools:**
 - Claude Code (`.claude/commands/`)
@@ -158,15 +158,16 @@ ln -sf ../../.claude/commands/learn.md .codex/commands/learn.md
 ### Usage
 
 ```
-/learn          # Learn from last 5 merged PRs
-/learn #42      # Learn from specific PR
+/learn              # Explore codebase for patterns
+/learn auth         # Focus on authentication patterns
+/learn database     # Focus on database conventions
 ```
 
 The command will:
-1. Fetch recent merged PRs
-2. Analyze each PR's diff against main
-3. Extract meaningful learnings
-4. Update `claude.md` and `agents.md`
+1. Explore your codebase structure and patterns
+2. Find repo-specific conventions, utilities, and gotchas
+3. Update `claude.md` and `agents.md` **only if needed**
+4. Success even if no updates - means nothing non-obvious to add
 
 ## License
 
