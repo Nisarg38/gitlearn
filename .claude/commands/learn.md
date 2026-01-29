@@ -1,71 +1,78 @@
-# /learn - Discover repo-specific context
+# /learn - Discover repo-specific context from recent changes
 
-Explore this codebase and extract valuable context for AI assistants.
+Explore recent commits and changes to extract valuable context for AI assistants.
 
 ## Instructions
 
-You are gitlearn - an AI that discovers meaningful patterns and conventions in codebases.
+You are gitlearn - an AI that discovers meaningful patterns from recent code changes.
 
-### What to Look For
+### Step 1: Get Recent Changes
 
-Explore the codebase to find:
+First, understand what's changed recently:
+
+```bash
+# See recent commits (last 10)
+git log --oneline -10
+
+# See what's different from main
+git diff main --stat
+```
+
+### Step 2: Explore the Diffs
+
+For significant changes, look at the actual diffs:
+
+```bash
+# Full diff against main
+git diff main
+
+# Or diff specific files that look interesting
+git diff main -- path/to/file
+```
+
+### Step 3: What to Look For
+
+From the recent changes, identify:
 
 1. **Architectural Decisions**
-   - How is the project structured? (monorepo, feature-based, layer-based)
-   - What patterns are used? (MVC, event sourcing, CQRS, etc.)
-   - How do services communicate?
+   - New patterns being established
+   - How new features are structured
+   - Service communication patterns
 
 2. **Coding Standards & Conventions**
-   - Naming conventions (files, functions, variables)
-   - Error handling patterns
-   - Logging practices
-   - Testing conventions
+   - Naming patterns in new code
+   - Error handling approaches
+   - Testing conventions being followed
 
 3. **Repo-Specific Utilities**
-   - Custom helper functions that should be reused
-   - Shared components or modules
+   - New helper functions that should be reused
+   - Shared modules or components added
    - Internal APIs or abstractions
 
 4. **Non-Obvious Gotchas**
    - Environment-specific behavior
-   - Cache expiration rules
-   - Rate limits or quotas
+   - Cache/expiration rules
    - Security requirements (auth, validation)
+   - Integration quirks
 
-5. **Integration Details**
-   - Third-party services and how they're configured
-   - API patterns (REST, GraphQL, etc.)
-   - Database conventions
+5. **Important Context**
+   - Why decisions were made (from commit messages)
+   - Configuration that matters
+   - Dependencies and how they're used
 
-### How to Explore
-
-1. Check the project structure:
-   - Look at `package.json`, `pyproject.toml`, `Cargo.toml`, etc.
-   - Examine the folder structure
-   - Read any existing documentation
-
-2. Sample key files:
-   - Entry points (main, index, app)
-   - Configuration files
-   - A few representative modules
-
-3. Look for patterns:
-   - How are similar things done across the codebase?
-   - What abstractions exist?
-
-### Update Context Files (ONLY IF NEEDED)
+### Step 4: Update Context Files (ONLY IF NEEDED)
 
 After exploring, decide if there's anything **worth documenting** that isn't already in `claude.md`.
 
 **Good additions:**
 - "All API routes are in `src/routes/` and must use the `validateRequest` middleware"
 - "Use `libs/logger.ts` for logging - never use console.log directly"
-- "Database migrations are in `prisma/migrations/` - run `pnpm db:migrate` after changes"
-- "Feature flags are managed via LaunchDarkly - see `src/flags/` for usage"
+- "Database migrations in `prisma/migrations/` - run `pnpm db:migrate` after changes"
+- "Feature flags managed via LaunchDarkly - see `src/flags/`"
 
 **Don't add:**
 - Obvious things (it's a React app, uses TypeScript)
-- Things already documented
+- Things already documented in `claude.md`
 - Generic best practices not specific to this repo
 
 ### If Updating
@@ -84,13 +91,13 @@ Format:
 ### Success Criteria
 
 **It's successful if you:**
-- Explored the codebase thoughtfully
-- Found meaningful patterns (or confirmed there's nothing non-obvious to add)
+- Explored recent commits and diffs thoughtfully
+- Found meaningful patterns (or confirmed nothing non-obvious to add)
 - Updated files only if there was genuine value to add
 
-**No update needed?** That's fine! Say "Explored the codebase - nothing non-obvious to add that isn't already documented."
+**No update needed?** That's fine! Say "Explored recent changes - nothing non-obvious to add that isn't already documented."
 
 ## Arguments
 
-- No args: General codebase exploration
+- No args: Explore recent commits and diff against main
 - `$ARGUMENTS`: Focus area (e.g., "auth", "database", "api patterns")

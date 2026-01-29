@@ -158,13 +158,13 @@ ln -sf ../../.claude/commands/learn.md .codex/commands/learn.md
 ### Usage
 
 ```
-/learn              # Explore codebase for patterns
+/learn              # Explore recent commits & diff main
 /learn auth         # Focus on authentication patterns
 /learn database     # Focus on database conventions
 ```
 
 The command will:
-1. Explore your codebase structure and patterns
+1. Analyze recent commits and diff against main
 2. Find repo-specific conventions, utilities, and gotchas
 3. Update `claude.md` and `agents.md` **only if needed**
 4. Success even if no updates - means nothing non-obvious to add
