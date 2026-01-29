@@ -11,7 +11,7 @@ mkdir -p .github/workflows && curl -o .github/workflows/gitlearn.yml \
 
 # 2. Add your API key (pick one)
 gh secret set ANTHROPIC_API_KEY    # Claude Sonnet 4.5 + thinking
-gh secret set OPENAI_API_KEY       # o4-mini + reasoning
+gh secret set OPENAI_API_KEY       # GPT-5.2 Codex
 gh secret set OPENROUTER_API_KEY   # Kimi K2 Thinking
 ```
 
@@ -63,7 +63,7 @@ gitlearn auto-detects your provider and enables thinking/reasoning by default:
 | Secret | Provider | Default Model | Reasoning |
 |--------|----------|---------------|-----------|
 | `ANTHROPIC_API_KEY` | Anthropic | claude-sonnet-4-5-20250929 | Extended thinking (10k tokens) |
-| `OPENAI_API_KEY` | OpenAI | o4-mini | Reasoning effort (medium) |
+| `OPENAI_API_KEY` | OpenAI | gpt-5.2-codex | Built-in reasoning |
 | `OPENROUTER_API_KEY` | OpenRouter | moonshotai/kimi-k2-thinking | Native thinking |
 
 ---
@@ -81,26 +81,14 @@ All configuration is done via repository variables (`gh variable set`):
 | `GITLEARN_REASONING_EFFORT` | OpenAI reasoning effort: `low`, `medium`, `high` (for o1/o3) |
 | `GITLEARN_API_BASE` | Custom endpoint for self-hosted models |
 
-### Disable Thinking/Reasoning
-
-Thinking is enabled by default. To disable for faster/cheaper runs:
+### Adjust Thinking Budget (Claude)
 
 ```bash
-# Disable Claude extended thinking
+# Disable extended thinking for faster/cheaper runs
 gh variable set GITLEARN_THINKING_BUDGET --body "0"
 
-# Disable OpenAI reasoning
-gh variable set GITLEARN_REASONING_EFFORT --body ""
-```
-
-### Adjust Thinking Budget
-
-```bash
 # More thinking for complex codebases
 gh variable set GITLEARN_THINKING_BUDGET --body "20000"
-
-# Higher reasoning effort
-gh variable set GITLEARN_REASONING_EFFORT --body "high"
 ```
 
 ### Custom/Self-hosted

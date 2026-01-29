@@ -9,7 +9,7 @@
 #
 # Default models (all with thinking/reasoning enabled):
 #   Anthropic: claude-sonnet-4-5-20250929 + extended thinking (10k tokens)
-#   OpenAI: o4-mini + reasoning effort (medium)
+#   OpenAI: gpt-5.2-codex
 #   OpenRouter: moonshotai/kimi-k2-thinking
 #
 # Model configuration (repository variables):
@@ -83,9 +83,8 @@ jobs:
           elif [ -n "$OPENAI_API_KEY" ]; then
             echo "provider=openai" >> $GITHUB_OUTPUT
             echo "api_key=$OPENAI_API_KEY" >> $GITHUB_OUTPUT
-            echo "model=${GITLEARN_MODEL:-o4-mini}" >> $GITHUB_OUTPUT
-            DEFAULT_REASONING="medium"  # Reasoning effort by default
-            echo "Using OpenAI with reasoning"
+            echo "model=${GITLEARN_MODEL:-gpt-5.2-codex}" >> $GITHUB_OUTPUT
+            echo "Using OpenAI"
           elif [ -n "$OPENROUTER_API_KEY" ]; then
             echo "provider=openrouter" >> $GITHUB_OUTPUT
             echo "api_key=$OPENROUTER_API_KEY" >> $GITHUB_OUTPUT
