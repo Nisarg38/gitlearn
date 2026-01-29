@@ -10,7 +10,7 @@
 # Default models (all with thinking/reasoning enabled):
 #   Anthropic: claude-sonnet-4-5-20250929 + extended thinking (10k tokens)
 #   OpenAI: gpt-5.2-codex
-#   OpenRouter: moonshotai/kimi-k2-thinking
+#   OpenRouter: moonshotai/kimi-k2.5
 #
 # Model configuration (repository variables):
 #   GITLEARN_MODEL: Override default model
@@ -88,7 +88,7 @@ jobs:
           elif [ -n "$OPENROUTER_API_KEY" ]; then
             echo "provider=openrouter" >> $GITHUB_OUTPUT
             echo "api_key=$OPENROUTER_API_KEY" >> $GITHUB_OUTPUT
-            echo "model=${GITLEARN_MODEL:-moonshotai/kimi-k2-thinking}" >> $GITHUB_OUTPUT
+            echo "model=${GITLEARN_MODEL:-moonshotai/kimi-k2.5}" >> $GITHUB_OUTPUT
             echo "Using OpenRouter"
           else
             echo "::error::No API key found. Add one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY"

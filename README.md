@@ -12,7 +12,7 @@ mkdir -p .github/workflows && curl -o .github/workflows/gitlearn.yml \
 # 2. Add your API key (pick one)
 gh secret set ANTHROPIC_API_KEY    # Claude Sonnet 4.5 + thinking
 gh secret set OPENAI_API_KEY       # GPT-5.2 Codex
-gh secret set OPENROUTER_API_KEY   # Kimi K2 Thinking
+gh secret set OPENROUTER_API_KEY   # Kimi K2.5
 ```
 
 That's it. Merge PRs as usual, review the "🤖 Context Updates" PR when convenient.
@@ -64,7 +64,7 @@ gitlearn auto-detects your provider and enables thinking/reasoning by default:
 |--------|----------|---------------|-----------|
 | `ANTHROPIC_API_KEY` | Anthropic | claude-sonnet-4-5-20250929 | Extended thinking (10k tokens) |
 | `OPENAI_API_KEY` | OpenAI | gpt-5.2-codex | Built-in reasoning |
-| `OPENROUTER_API_KEY` | OpenRouter | moonshotai/kimi-k2-thinking | Native thinking |
+| `OPENROUTER_API_KEY` | OpenRouter | moonshotai/kimi-k2.5 | Native thinking |
 
 ---
 
