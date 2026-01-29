@@ -7,10 +7,10 @@
 #
 # Auto-detects provider from your secret name. That's it!
 #
-# Recommended models per provider:
-#   Anthropic: claude-opus-4-5-20250514 (default, with extended thinking)
-#   OpenAI: gpt-4o (default)
-#   OpenRouter: moonshotai/kimi-k2 (default)
+# Default models (all with thinking/reasoning enabled):
+#   Anthropic: claude-sonnet-4-5-20250929 + extended thinking (10k tokens)
+#   OpenAI: o4-mini + reasoning effort (medium)
+#   OpenRouter: moonshotai/kimi-k2-thinking
 #
 # Model configuration (repository variables):
 #   GITLEARN_MODEL: Override default model
@@ -56,6 +56,10 @@ jobs:
       - name: Detect provider
         id: provider
         run: |
+          # Initialize defaults
+          DEFAULT_THINKING=""
+          DEFAULT_REASONING=""
+
           # Custom endpoint overrides provider detection
           if [ -n "$GITLEARN_API_BASE" ]; then
             # Use whichever key is available with custom endpoint
@@ -73,17 +77,19 @@ jobs:
           elif [ -n "$ANTHROPIC_API_KEY" ]; then
             echo "provider=anthropic" >> $GITHUB_OUTPUT
             echo "api_key=$ANTHROPIC_API_KEY" >> $GITHUB_OUTPUT
-            echo "model=${GITLEARN_MODEL:-claude-opus-4-5-20250514}" >> $GITHUB_OUTPUT
-            echo "Using Anthropic"
+            echo "model=${GITLEARN_MODEL:-claude-sonnet-4-5-20250929}" >> $GITHUB_OUTPUT
+            DEFAULT_THINKING="10000"  # Extended thinking by default
+            echo "Using Anthropic with extended thinking"
           elif [ -n "$OPENAI_API_KEY" ]; then
             echo "provider=openai" >> $GITHUB_OUTPUT
             echo "api_key=$OPENAI_API_KEY" >> $GITHUB_OUTPUT
-            echo "model=${GITLEARN_MODEL:-gpt-4o}" >> $GITHUB_OUTPUT
-            echo "Using OpenAI"
+            echo "model=${GITLEARN_MODEL:-o4-mini}" >> $GITHUB_OUTPUT
+            DEFAULT_REASONING="medium"  # Reasoning effort by default
+            echo "Using OpenAI with reasoning"
           elif [ -n "$OPENROUTER_API_KEY" ]; then
             echo "provider=openrouter" >> $GITHUB_OUTPUT
             echo "api_key=$OPENROUTER_API_KEY" >> $GITHUB_OUTPUT
-            echo "model=${GITLEARN_MODEL:-moonshotai/kimi-k2}" >> $GITHUB_OUTPUT
+            echo "model=${GITLEARN_MODEL:-moonshotai/kimi-k2-thinking}" >> $GITHUB_OUTPUT
             echo "Using OpenRouter"
           else
             echo "::error::No API key found. Add one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY"
@@ -93,8 +99,8 @@ jobs:
           # Pass through model config
           echo "max_tokens=${GITLEARN_MAX_TOKENS:-1024}" >> $GITHUB_OUTPUT
           echo "temperature=${GITLEARN_TEMPERATURE:-}" >> $GITHUB_OUTPUT
-          echo "thinking_budget=${GITLEARN_THINKING_BUDGET:-}" >> $GITHUB_OUTPUT
-          echo "reasoning_effort=${GITLEARN_REASONING_EFFORT:-}" >> $GITHUB_OUTPUT
+          echo "thinking_budget=${GITLEARN_THINKING_BUDGET:-$DEFAULT_THINKING}" >> $GITHUB_OUTPUT
+          echo "reasoning_effort=${GITLEARN_REASONING_EFFORT:-$DEFAULT_REASONING}" >> $GITHUB_OUTPUT
 
       - name: Setup context files
         id: setup

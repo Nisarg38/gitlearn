@@ -10,9 +10,9 @@ mkdir -p .github/workflows && curl -o .github/workflows/gitlearn.yml \
   https://raw.githubusercontent.com/Nisarg38/gitlearn/main/.github/workflows/gitlearn.yml
 
 # 2. Add your API key (pick one)
-gh secret set ANTHROPIC_API_KEY    # Claude Opus 4.5
-gh secret set OPENAI_API_KEY       # GPT-4o
-gh secret set OPENROUTER_API_KEY   # Kimi K2
+gh secret set ANTHROPIC_API_KEY    # Claude Sonnet 4.5 + thinking
+gh secret set OPENAI_API_KEY       # o4-mini + reasoning
+gh secret set OPENROUTER_API_KEY   # Kimi K2 Thinking
 ```
 
 That's it. Merge PRs as usual, review the "🤖 Context Updates" PR when convenient.
@@ -58,13 +58,13 @@ your-repo/
 
 ## Providers
 
-gitlearn auto-detects your provider from the secret name:
+gitlearn auto-detects your provider and enables thinking/reasoning by default:
 
-| Secret | Provider | Default Model |
-|--------|----------|---------------|
-| `ANTHROPIC_API_KEY` | Anthropic | **claude-opus-4-5-20250514** |
-| `OPENAI_API_KEY` | OpenAI | gpt-4o |
-| `OPENROUTER_API_KEY` | OpenRouter | moonshotai/kimi-k2 |
+| Secret | Provider | Default Model | Reasoning |
+|--------|----------|---------------|-----------|
+| `ANTHROPIC_API_KEY` | Anthropic | claude-sonnet-4-5-20250929 | Extended thinking (10k tokens) |
+| `OPENAI_API_KEY` | OpenAI | o4-mini | Reasoning effort (medium) |
+| `OPENROUTER_API_KEY` | OpenRouter | moonshotai/kimi-k2-thinking | Native thinking |
 
 ---
 
@@ -81,21 +81,26 @@ All configuration is done via repository variables (`gh variable set`):
 | `GITLEARN_REASONING_EFFORT` | OpenAI reasoning effort: `low`, `medium`, `high` (for o1/o3) |
 | `GITLEARN_API_BASE` | Custom endpoint for self-hosted models |
 
-### Enable Extended Thinking (Claude)
+### Disable Thinking/Reasoning
 
-For deeper analysis with Claude Opus 4.5:
+Thinking is enabled by default. To disable for faster/cheaper runs:
 
 ```bash
-gh variable set GITLEARN_THINKING_BUDGET --body "10000"
+# Disable Claude extended thinking
+gh variable set GITLEARN_THINKING_BUDGET --body "0"
+
+# Disable OpenAI reasoning
+gh variable set GITLEARN_REASONING_EFFORT --body ""
 ```
 
-### Use OpenAI Reasoning Models
-
-For o1/o3 models:
+### Adjust Thinking Budget
 
 ```bash
-gh variable set GITLEARN_MODEL --body "o1"
-gh variable set GITLEARN_REASONING_EFFORT --body "medium"
+# More thinking for complex codebases
+gh variable set GITLEARN_THINKING_BUDGET --body "20000"
+
+# Higher reasoning effort
+gh variable set GITLEARN_REASONING_EFFORT --body "high"
 ```
 
 ### Custom/Self-hosted
