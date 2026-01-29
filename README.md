@@ -2,7 +2,7 @@
 
 **Your codebase has a story. Let AI remember it.**
 
-gitlearn is a GitHub Action that watches your merged PRs and distills valuable learnings into context files that AI coding assistants actually use. No more explaining the same architectural decisions over and over.
+gitlearn is a GitHub Action that learns from merged PRs and keeps your AI context files (claude.md, agents.md) fresh and in sync.
 
 ## How It Works
 
