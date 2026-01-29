@@ -1,1 +1,108 @@
-.
+# gitlearn
+
+**Your codebase has a story. Let AI remember it.**
+
+gitlearn is a GitHub Action that watches your merged PRs and distills valuable learnings into context files that AI coding assistants actually use. No more explaining the same architectural decisions over and over.
+
+## How It Works
+
+```
+PR merged → AI analyzes changes → Extracts learnings → Updates context files → Opens PR for review
+```
+
+When you merge a PR, gitlearn:
+1. Reads the diff and PR description
+2. Asks an AI to extract *meaningful* learnings (not obvious stuff)
+3. Appends insights to your `claude.md` file
+4. Batches updates into a single PR for you to review
+
+## The Magic: `claude.md` ↔ `agents.md` Sync
+
+Different AI tools look for different context files:
+- **Claude Code** reads `claude.md`
+- **Cursor, Windsurf** and others read `agents.md`
+
+gitlearn keeps them in sync automatically using a symlink. One source of truth, all your AI assistants stay informed.
+
+```
+claude.md  ← actual content lives here
+agents.md  → symlink to claude.md
+```
+
+If you already have separate files, gitlearn will intelligently merge them on first run.
+
+## Quick Setup
+
+```bash
+# Add the workflow to your repo
+mkdir -p .github/workflows
+curl -o .github/workflows/gitlearn.yml \
+  https://raw.githubusercontent.com/Nisarg38/gitlearn/main/.github/workflows/gitlearn.yml
+
+# Add your API key (pick one)
+gh secret set ANTHROPIC_API_KEY   # Recommended
+# or
+gh secret set OPENAI_API_KEY
+# or
+gh secret set OPENROUTER_API_KEY
+```
+
+That's it. Merge a PR and watch the magic happen.
+
+## Supported Providers
+
+| Provider | Default Model | Notes |
+|----------|--------------|-------|
+| **Anthropic** | `claude-sonnet-4-5-20250929` | Extended thinking enabled |
+| **OpenAI** | `gpt-5.2-codex` | |
+| **OpenRouter** | `moonshotai/kimi-k2.5` | Access to many models |
+
+## Configuration
+
+All optional. Set these as repository variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `GITLEARN_MODEL` | Override the AI model | Provider default |
+| `GITLEARN_MAX_TOKENS` | Response token limit | `2048` |
+| `GITLEARN_THINKING_BUDGET` | Anthropic thinking tokens | `10000` |
+| `GITLEARN_SKIP_LABELS` | PR labels to skip | `dependencies,chore` |
+| `GITLEARN_API_BASE` | Custom OpenAI-compatible endpoint | - |
+
+## What Gets Learned?
+
+gitlearn is opinionated about what's worth remembering:
+
+**Good learnings:**
+- "Uses event sourcing for order state management"
+- "All API routes require zod validation middleware"
+- "Redis keys expire after 24h - don't cache user sessions longer"
+- "Stripe webhooks need signature verification in production"
+
+**Skipped (outputs NONE):**
+- Version bumps and dependency updates
+- Typo fixes and minor refactors
+- Test additions without architectural significance
+- Documentation-only changes
+
+## Example Output
+
+After merging a PR that adds authentication:
+
+```markdown
+<!-- PR #42 -->
+### Authentication
+- Uses JWT with 15min access tokens, 7-day refresh tokens stored in httpOnly cookies
+- Auth middleware at `src/middleware/auth.ts` - must be applied to all `/api/protected/*` routes
+```
+
+## Skip Specific PRs
+
+Add labels to skip learning:
+- `dependencies` - skipped by default
+- `chore` - skipped by default
+- Custom labels via `GITLEARN_SKIP_LABELS`
+
+## License
+
+MIT
