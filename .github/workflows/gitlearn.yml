@@ -7,8 +7,17 @@
 #
 # Auto-detects provider from your secret name. That's it!
 #
-# Advanced options (repository variables):
+# Recommended models per provider:
+#   Anthropic: claude-opus-4-5-20250514 (default, with extended thinking)
+#   OpenAI: gpt-4o (default)
+#   OpenRouter: moonshotai/kimi-k2 (default)
+#
+# Model configuration (repository variables):
 #   GITLEARN_MODEL: Override default model
+#   GITLEARN_MAX_TOKENS: Max output tokens (default: 1024)
+#   GITLEARN_TEMPERATURE: Temperature 0-1 (default: not set, uses model default)
+#   GITLEARN_THINKING_BUDGET: Extended thinking tokens for Claude (enables deep reasoning)
+#   GITLEARN_REASONING_EFFORT: OpenAI reasoning effort: low|medium|high (for o1/o3 models)
 #   GITLEARN_API_BASE: Custom endpoint (uses OpenAI-compatible format)
 
 name: gitlearn
@@ -31,8 +40,12 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-      # Optional overrides
+      # Model configuration
       GITLEARN_MODEL: ${{ vars.GITLEARN_MODEL }}
+      GITLEARN_MAX_TOKENS: ${{ vars.GITLEARN_MAX_TOKENS }}
+      GITLEARN_TEMPERATURE: ${{ vars.GITLEARN_TEMPERATURE }}
+      GITLEARN_THINKING_BUDGET: ${{ vars.GITLEARN_THINKING_BUDGET }}
+      GITLEARN_REASONING_EFFORT: ${{ vars.GITLEARN_REASONING_EFFORT }}
       GITLEARN_API_BASE: ${{ vars.GITLEARN_API_BASE }}
 
     steps:
@@ -60,7 +73,7 @@ jobs:
           elif [ -n "$ANTHROPIC_API_KEY" ]; then
             echo "provider=anthropic" >> $GITHUB_OUTPUT
             echo "api_key=$ANTHROPIC_API_KEY" >> $GITHUB_OUTPUT
-            echo "model=${GITLEARN_MODEL:-claude-sonnet-4-20250514}" >> $GITHUB_OUTPUT
+            echo "model=${GITLEARN_MODEL:-claude-opus-4-5-20250514}" >> $GITHUB_OUTPUT
             echo "Using Anthropic"
           elif [ -n "$OPENAI_API_KEY" ]; then
             echo "provider=openai" >> $GITHUB_OUTPUT
@@ -70,12 +83,18 @@ jobs:
           elif [ -n "$OPENROUTER_API_KEY" ]; then
             echo "provider=openrouter" >> $GITHUB_OUTPUT
             echo "api_key=$OPENROUTER_API_KEY" >> $GITHUB_OUTPUT
-            echo "model=${GITLEARN_MODEL:-anthropic/claude-sonnet-4-20250514}" >> $GITHUB_OUTPUT
+            echo "model=${GITLEARN_MODEL:-moonshotai/kimi-k2}" >> $GITHUB_OUTPUT
             echo "Using OpenRouter"
           else
             echo "::error::No API key found. Add one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY"
             exit 1
           fi
+
+          # Pass through model config
+          echo "max_tokens=${GITLEARN_MAX_TOKENS:-1024}" >> $GITHUB_OUTPUT
+          echo "temperature=${GITLEARN_TEMPERATURE:-}" >> $GITHUB_OUTPUT
+          echo "thinking_budget=${GITLEARN_THINKING_BUDGET:-}" >> $GITHUB_OUTPUT
+          echo "reasoning_effort=${GITLEARN_REASONING_EFFORT:-}" >> $GITHUB_OUTPUT
 
       - name: Setup context files
         id: setup
@@ -125,6 +144,10 @@ EOF
           API_KEY: ${{ steps.provider.outputs.api_key }}
           PROVIDER: ${{ steps.provider.outputs.provider }}
           MODEL: ${{ steps.provider.outputs.model }}
+          MAX_TOKENS: ${{ steps.provider.outputs.max_tokens }}
+          TEMPERATURE: ${{ steps.provider.outputs.temperature }}
+          THINKING_BUDGET: ${{ steps.provider.outputs.thinking_budget }}
+          REASONING_EFFORT: ${{ steps.provider.outputs.reasoning_effort }}
         run: |
           CLAUDE_CONTENT=$(cat claude.md)
           AGENTS_CONTENT=$(cat agents.md)
@@ -140,13 +163,40 @@ $AGENTS_CONTENT
 Output only the merged markdown content, nothing else."
 
           if [ "$PROVIDER" = "anthropic" ]; then
-            MERGED=$(curl -s https://api.anthropic.com/v1/messages \
+            # Build Anthropic request with optional extended thinking
+            if [ -n "$THINKING_BUDGET" ]; then
+              REQUEST=$(jq -n \
+                --arg model "$MODEL" \
+                --arg prompt "$PROMPT" \
+                --argjson max_tokens 16384 \
+                --argjson budget "$THINKING_BUDGET" \
+                '{
+                  model: $model,
+                  max_tokens: $max_tokens,
+                  thinking: { type: "enabled", budget_tokens: $budget },
+                  messages: [{role: "user", content: $prompt}]
+                }')
+            else
+              REQUEST=$(jq -n \
+                --arg model "$MODEL" \
+                --arg prompt "$PROMPT" \
+                --argjson max_tokens "${MAX_TOKENS:-4096}" \
+                '{model: $model, max_tokens: $max_tokens, messages: [{role: "user", content: $prompt}]}')
+
+              # Add temperature if set
+              if [ -n "$TEMPERATURE" ]; then
+                REQUEST=$(echo "$REQUEST" | jq --argjson temp "$TEMPERATURE" '. + {temperature: $temp}')
+              fi
+            fi
+
+            RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
               -H "x-api-key: $API_KEY" \
               -H "anthropic-version: 2023-06-01" \
               -H "content-type: application/json" \
-              -d "$(jq -n --arg model "$MODEL" --arg prompt "$PROMPT" \
-                '{model: $model, max_tokens: 4096, messages: [{role: "user", content: $prompt}]}')" \
-              | jq -r '.content[0].text')
+              -d "$REQUEST")
+
+            # Extract text from response (handle both thinking and non-thinking formats)
+            MERGED=$(echo "$RESPONSE" | jq -r '.content | map(select(.type == "text")) | .[0].text // empty')
           else
             case "$PROVIDER" in
               openai) ENDPOINT="https://api.openai.com/v1/chat/completions" ;;
@@ -154,13 +204,28 @@ Output only the merged markdown content, nothing else."
               custom) ENDPOINT="${GITLEARN_API_BASE}/chat/completions" ;;
             esac
 
+            # Build OpenAI-compatible request
+            REQUEST=$(jq -n \
+              --arg model "$MODEL" \
+              --arg prompt "$PROMPT" \
+              --argjson max_tokens "${MAX_TOKENS:-4096}" \
+              '{model: $model, max_tokens: $max_tokens, messages: [{role: "user", content: $prompt}]}')
+
+            # Add temperature if set
+            if [ -n "$TEMPERATURE" ]; then
+              REQUEST=$(echo "$REQUEST" | jq --argjson temp "$TEMPERATURE" '. + {temperature: $temp}')
+            fi
+
+            # Add reasoning_effort for OpenAI o1/o3 models
+            if [ -n "$REASONING_EFFORT" ]; then
+              REQUEST=$(echo "$REQUEST" | jq --arg effort "$REASONING_EFFORT" '. + {reasoning_effort: $effort}')
+            fi
+
             MERGED=$(curl -s "$ENDPOINT" \
               -H "Authorization: Bearer $API_KEY" \
               -H "Content-Type: application/json" \
               -H "HTTP-Referer: https://github.com/${{ github.repository }}" \
-              -d "$(jq -n --arg model "$MODEL" --arg prompt "$PROMPT" \
-                '{model: $model, max_tokens: 4096, messages: [{role: "user", content: $prompt}]}')" \
-              | jq -r '.choices[0].message.content')
+              -d "$REQUEST" | jq -r '.choices[0].message.content')
           fi
 
           if [ -n "$MERGED" ] && [ "$MERGED" != "null" ]; then
@@ -180,12 +245,16 @@ Output only the merged markdown content, nothing else."
           API_KEY: ${{ steps.provider.outputs.api_key }}
           PROVIDER: ${{ steps.provider.outputs.provider }}
           MODEL: ${{ steps.provider.outputs.model }}
+          MAX_TOKENS: ${{ steps.provider.outputs.max_tokens }}
+          TEMPERATURE: ${{ steps.provider.outputs.temperature }}
+          THINKING_BUDGET: ${{ steps.provider.outputs.thinking_budget }}
+          REASONING_EFFORT: ${{ steps.provider.outputs.reasoning_effort }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PR_NUM="${{ github.event.pull_request.number }}"
           PR_DIFF=$(gh pr diff $PR_NUM --repo ${{ github.repository }} 2>/dev/null | head -c 10000 || echo "Diff unavailable")
 
-          # Build prompt with proper escaping
+          # Build prompt
           PROMPT=$(cat << 'PROMPT_EOF'
 Based on this merged PR, suggest a 1-3 line addition for the project AI context file. Focus on:
 - Architectural decisions
@@ -207,13 +276,38 @@ Code Changes:
 $PR_DIFF"
 
           if [ "$PROVIDER" = "anthropic" ]; then
-            SUGGESTION=$(curl -s https://api.anthropic.com/v1/messages \
+            # Build Anthropic request with optional extended thinking
+            if [ -n "$THINKING_BUDGET" ]; then
+              REQUEST=$(jq -n \
+                --arg model "$MODEL" \
+                --arg prompt "$PROMPT" \
+                --argjson max_tokens 16384 \
+                --argjson budget "$THINKING_BUDGET" \
+                '{
+                  model: $model,
+                  max_tokens: $max_tokens,
+                  thinking: { type: "enabled", budget_tokens: $budget },
+                  messages: [{role: "user", content: $prompt}]
+                }')
+            else
+              REQUEST=$(jq -n \
+                --arg model "$MODEL" \
+                --arg prompt "$PROMPT" \
+                --argjson max_tokens "${MAX_TOKENS:-1024}" \
+                '{model: $model, max_tokens: $max_tokens, messages: [{role: "user", content: $prompt}]}')
+
+              if [ -n "$TEMPERATURE" ]; then
+                REQUEST=$(echo "$REQUEST" | jq --argjson temp "$TEMPERATURE" '. + {temperature: $temp}')
+              fi
+            fi
+
+            RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
               -H "x-api-key: $API_KEY" \
               -H "anthropic-version: 2023-06-01" \
               -H "content-type: application/json" \
-              -d "$(jq -n --arg model "$MODEL" --arg prompt "$PROMPT" \
-                '{model: $model, max_tokens: 512, messages: [{role: "user", content: $prompt}]}')" \
-              | jq -r '.content[0].text')
+              -d "$REQUEST")
+
+            SUGGESTION=$(echo "$RESPONSE" | jq -r '.content | map(select(.type == "text")) | .[0].text // empty')
           else
             case "$PROVIDER" in
               openai) ENDPOINT="https://api.openai.com/v1/chat/completions" ;;
@@ -221,13 +315,25 @@ $PR_DIFF"
               custom) ENDPOINT="${GITLEARN_API_BASE}/chat/completions" ;;
             esac
 
+            REQUEST=$(jq -n \
+              --arg model "$MODEL" \
+              --arg prompt "$PROMPT" \
+              --argjson max_tokens "${MAX_TOKENS:-1024}" \
+              '{model: $model, max_tokens: $max_tokens, messages: [{role: "user", content: $prompt}]}')
+
+            if [ -n "$TEMPERATURE" ]; then
+              REQUEST=$(echo "$REQUEST" | jq --argjson temp "$TEMPERATURE" '. + {temperature: $temp}')
+            fi
+
+            if [ -n "$REASONING_EFFORT" ]; then
+              REQUEST=$(echo "$REQUEST" | jq --arg effort "$REASONING_EFFORT" '. + {reasoning_effort: $effort}')
+            fi
+
             SUGGESTION=$(curl -s "$ENDPOINT" \
               -H "Authorization: Bearer $API_KEY" \
               -H "Content-Type: application/json" \
               -H "HTTP-Referer: https://github.com/${{ github.repository }}" \
-              -d "$(jq -n --arg model "$MODEL" --arg prompt "$PROMPT" \
-                '{model: $model, max_tokens: 512, messages: [{role: "user", content: $prompt}]}')" \
-              | jq -r '.choices[0].message.content')
+              -d "$REQUEST" | jq -r '.choices[0].message.content')
           fi
 
           # Handle empty or error responses

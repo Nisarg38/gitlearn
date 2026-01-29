@@ -10,9 +10,9 @@ mkdir -p .github/workflows && curl -o .github/workflows/gitlearn.yml \
   https://raw.githubusercontent.com/Nisarg38/gitlearn/main/.github/workflows/gitlearn.yml
 
 # 2. Add your API key (pick one)
-gh secret set ANTHROPIC_API_KEY    # Claude
-gh secret set OPENAI_API_KEY       # GPT-4
-gh secret set OPENROUTER_API_KEY   # Any model via OpenRouter
+gh secret set ANTHROPIC_API_KEY    # Claude Opus 4.5
+gh secret set OPENAI_API_KEY       # GPT-4o
+gh secret set OPENROUTER_API_KEY   # Kimi K2
 ```
 
 That's it. Merge PRs as usual, review the "🤖 Context Updates" PR when convenient.
@@ -62,24 +62,50 @@ gitlearn auto-detects your provider from the secret name:
 
 | Secret | Provider | Default Model |
 |--------|----------|---------------|
-| `ANTHROPIC_API_KEY` | Anthropic | claude-sonnet-4-20250514 |
+| `ANTHROPIC_API_KEY` | Anthropic | **claude-opus-4-5-20250514** |
 | `OPENAI_API_KEY` | OpenAI | gpt-4o |
-| `OPENROUTER_API_KEY` | OpenRouter | anthropic/claude-sonnet-4-20250514 |
+| `OPENROUTER_API_KEY` | OpenRouter | moonshotai/kimi-k2 |
+
+---
+
+## Model Configuration
+
+All configuration is done via repository variables (`gh variable set`):
+
+| Variable | Description |
+|----------|-------------|
+| `GITLEARN_MODEL` | Override default model |
+| `GITLEARN_MAX_TOKENS` | Max output tokens (default: 1024) |
+| `GITLEARN_TEMPERATURE` | Temperature 0-1 (uses model default if not set) |
+| `GITLEARN_THINKING_BUDGET` | Extended thinking tokens for Claude (enables deep reasoning) |
+| `GITLEARN_REASONING_EFFORT` | OpenAI reasoning effort: `low`, `medium`, `high` (for o1/o3) |
+| `GITLEARN_API_BASE` | Custom endpoint for self-hosted models |
+
+### Enable Extended Thinking (Claude)
+
+For deeper analysis with Claude Opus 4.5:
+
+```bash
+gh variable set GITLEARN_THINKING_BUDGET --body "10000"
+```
+
+### Use OpenAI Reasoning Models
+
+For o1/o3 models:
+
+```bash
+gh variable set GITLEARN_MODEL --body "o1"
+gh variable set GITLEARN_REASONING_EFFORT --body "medium"
+```
 
 ### Custom/Self-hosted
 
 For Ollama, vLLM, LocalAI, or any OpenAI-compatible API:
 
 ```bash
-gh secret set OPENAI_API_KEY      # Use any key name, or "dummy" if no auth needed
+gh secret set OPENAI_API_KEY      # Use any key, or "dummy" if no auth
 gh variable set GITLEARN_API_BASE --body "http://your-server:11434/v1"
 gh variable set GITLEARN_MODEL --body "llama3"
-```
-
-### Override Model
-
-```bash
-gh variable set GITLEARN_MODEL --body "claude-3-haiku-20240307"
 ```
 
 ---
