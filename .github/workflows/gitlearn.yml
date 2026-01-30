@@ -1,497 +1,638 @@
-# gitlearn - Learn from merged PRs and keep AI context files fresh
+# gitlearn v2 - Intelligent PR Insights Extraction
 # https://github.com/Nisarg38/gitlearn
 #
+# Triggers after N merged PRs, uses agentic AI to extract repo-specific insights
+#
 # Setup:
-#   mkdir -p .github/workflows && curl -o .github/workflows/gitlearn.yml https://raw.githubusercontent.com/Nisarg38/gitlearn/main/.github/workflows/gitlearn.yml
-#   gh secret set ANTHROPIC_API_KEY  # or OPENAI_API_KEY, OPENROUTER_API_KEY
+#   1. Copy this workflow to .github/workflows/gitlearn.yml
+#   2. Add API key: gh secret set ANTHROPIC_API_KEY (or OPENAI_API_KEY, OPENROUTER_API_KEY)
+#   3. Optionally configure: gh variable set GITLEARN_BATCH_SIZE --body "10"
 #
 # Default models:
-#   Anthropic: claude-sonnet-4-5-20250929 (extended thinking)
-#   OpenAI: gpt-5.2-codex
-#   OpenRouter: moonshotai/kimi-k2.5
+#   Anthropic: claude-sonnet-4-20250514
+#   OpenAI: gpt-4o
+#   OpenRouter: anthropic/claude-sonnet-4
 
 name: gitlearn
 
 on:
-  # Weekly schedule - runs every Monday at 9am UTC (processes all merged PRs from the past week)
-  schedule:
-    - cron: '0 9 * * 1'
-  # Manual trigger for on-demand runs
-  workflow_dispatch:
-  # Per-PR trigger (optional - disable by setting GITLEARN_TRIGGER_MODE to 'weekly')
   pull_request:
     types: [closed]
     branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      force_run:
+        description: 'Force run regardless of PR count threshold'
+        required: false
+        default: 'false'
+        type: boolean
+      bootstrap:
+        description: 'Run bootstrap mode (full repo analysis)'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  GITLEARN_BATCH_SIZE: ${{ vars.GITLEARN_BATCH_SIZE || '10' }}
+  GITLEARN_MAX_ITERATIONS: ${{ vars.GITLEARN_MAX_ITERATIONS || '50' }}
+  GITLEARN_BOOTSTRAP_ITERATIONS: ${{ vars.GITLEARN_BOOTSTRAP_ITERATIONS || '100' }}
+  GITLEARN_SKIP_LABELS: ${{ vars.GITLEARN_SKIP_LABELS || 'dependencies,chore' }}
+  GITLEARN_REVIEWER: ${{ vars.GITLEARN_REVIEWER }}
+  GITLEARN_MODEL: ${{ vars.GITLEARN_MODEL }}
 
 jobs:
-  learn:
+  check-threshold:
     if: |
-      github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && github.event.pull_request.merged == true && vars.GITLEARN_TRIGGER_MODE != 'weekly')
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-
-    env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-      GITLEARN_MODEL: ${{ vars.GITLEARN_MODEL }}
-      GITLEARN_MAX_TOKENS: ${{ vars.GITLEARN_MAX_TOKENS }}
-      GITLEARN_THINKING_BUDGET: ${{ vars.GITLEARN_THINKING_BUDGET }}
-      GITLEARN_API_BASE: ${{ vars.GITLEARN_API_BASE }}
-      GITLEARN_SKIP_LABELS: ${{ vars.GITLEARN_SKIP_LABELS }}
-      GITLEARN_REVIEWER: ${{ vars.GITLEARN_REVIEWER }}
-      GITLEARN_TRIGGER_MODE: ${{ vars.GITLEARN_TRIGGER_MODE }}
+    outputs:
+      should_run: ${{ steps.threshold.outputs.should_run }}
+      is_bootstrap: ${{ steps.threshold.outputs.is_bootstrap }}
+      pr_count: ${{ steps.threshold.outputs.pr_count }}
+      pr_numbers: ${{ steps.threshold.outputs.pr_numbers }}
+      last_tag: ${{ steps.threshold.outputs.last_tag }}
 
     steps:
       - name: Check skip labels
-        id: skip
+        id: skip_check
+        if: github.event_name == 'pull_request'
         run: |
-          # Skip label check only applies to pull_request events
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "skip=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          SKIP_LABELS="${GITLEARN_SKIP_LABELS:-dependencies,chore}"
+          SKIP_LABELS="${{ env.GITLEARN_SKIP_LABELS }}"
           PR_LABELS='${{ toJson(github.event.pull_request.labels.*.name) }}'
           for label in ${SKIP_LABELS//,/ }; do
             if echo "$PR_LABELS" | grep -qi "\"$label\""; then
               echo "skip=true" >> $GITHUB_OUTPUT
-              echo "### ⏭️ gitlearn" >> $GITHUB_STEP_SUMMARY
-              echo "Skipped - PR has label: $label" >> $GITHUB_STEP_SUMMARY
+              echo "Skipping - PR has label: $label"
               exit 0
             fi
           done
           echo "skip=false" >> $GITHUB_OUTPUT
 
       - uses: actions/checkout@v4
-        if: steps.skip.outputs.skip != 'true'
+        if: steps.skip_check.outputs.skip != 'true'
         with:
           fetch-depth: 0
+          fetch-tags: true
 
-      - name: Collect merged PRs (scheduled run)
-        if: steps.skip.outputs.skip != 'true' && github.event_name != 'pull_request'
-        id: collect
+      - name: Check threshold
+        if: steps.skip_check.outputs.skip != 'true'
+        id: threshold
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Get merged PRs from the past 7 days
-          SINCE=$(date -d '7 days ago' -Iseconds 2>/dev/null || date -v-7d -Iseconds)
-          SKIP_LABELS="${GITLEARN_SKIP_LABELS:-dependencies,chore}"
+          # Check for bootstrap mode
+          if [ "${{ github.event.inputs.bootstrap }}" = "true" ]; then
+            echo "Bootstrap mode requested via workflow_dispatch"
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            echo "is_bootstrap=true" >> $GITHUB_OUTPUT
+            echo "pr_count=0" >> $GITHUB_OUTPUT
+            echo "pr_numbers=" >> $GITHUB_OUTPUT
+            echo "last_tag=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
 
-          echo "Collecting merged PRs since $SINCE..."
+          # Find last gitlearn run tag
+          LAST_TAG=$(git tag -l "gitlearn-run-*" --sort=-version:refname | head -1)
+          echo "last_tag=$LAST_TAG" >> $GITHUB_OUTPUT
 
-          # Get merged PRs, filter out skipped labels
-          PRS=$(gh pr list --state merged --search "merged:>=$SINCE" --json number,title,body,labels --limit 50)
+          # Check if this is first run (bootstrap)
+          if [ -z "$LAST_TAG" ]; then
+            echo "No gitlearn tags found - this is a bootstrap run"
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            echo "is_bootstrap=true" >> $GITHUB_OUTPUT
+            echo "pr_count=0" >> $GITHUB_OUTPUT
+            echo "pr_numbers=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Last gitlearn tag: $LAST_TAG"
+
+          # Get timestamp of last tag
+          TAG_DATE=$(git log -1 --format=%cI "$LAST_TAG" 2>/dev/null || echo "")
+          if [ -z "$TAG_DATE" ]; then
+            echo "Could not get tag date, treating as bootstrap"
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            echo "is_bootstrap=true" >> $GITHUB_OUTPUT
+            echo "pr_count=0" >> $GITHUB_OUTPUT
+            echo "pr_numbers=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Tag date: $TAG_DATE"
+
+          # Get merged PRs since last tag (excluding skip labels)
+          SKIP_LABELS="${{ env.GITLEARN_SKIP_LABELS }}"
+
+          PRS=$(gh pr list --state merged --search "merged:>=$TAG_DATE" --json number,title,labels --limit 100)
 
           # Filter out PRs with skip labels
           FILTERED_PRS=$(echo "$PRS" | jq -c --arg skip "$SKIP_LABELS" '
             [.[] | select(
               .labels as $labels |
               ($skip | split(",")) as $skipList |
-              ($labels | map(.name) | map(. as $l | $skipList | map(. == $l) | any) | any) | not
+              ([$labels[].name] | map(. as $l | $skipList | map(. == $l) | any) | any) | not
             )]
           ')
 
           PR_COUNT=$(echo "$FILTERED_PRS" | jq 'length')
-          echo "Found $PR_COUNT PRs to process"
+          PR_NUMBERS=$(echo "$FILTERED_PRS" | jq -r '[.[].number] | join(",")')
 
-          if [ "$PR_COUNT" -eq "0" ]; then
-            echo "skip=true" >> $GITHUB_OUTPUT
-            echo "### 📚 gitlearn (weekly)" >> $GITHUB_STEP_SUMMARY
-            echo "No new PRs to learn from this week." >> $GITHUB_STEP_SUMMARY
+          echo "Merged PRs since last run: $PR_COUNT"
+          echo "PR numbers: $PR_NUMBERS"
+          echo "pr_count=$PR_COUNT" >> $GITHUB_OUTPUT
+          echo "pr_numbers=$PR_NUMBERS" >> $GITHUB_OUTPUT
+          echo "is_bootstrap=false" >> $GITHUB_OUTPUT
+
+          # Check threshold
+          BATCH_SIZE="${{ env.GITLEARN_BATCH_SIZE }}"
+
+          if [ "${{ github.event.inputs.force_run }}" = "true" ]; then
+            echo "Force run requested"
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          elif [ "$PR_COUNT" -ge "$BATCH_SIZE" ]; then
+            echo "Threshold met: $PR_COUNT >= $BATCH_SIZE"
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          else
+            echo "Threshold not met: $PR_COUNT < $BATCH_SIZE"
+            echo "should_run=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Summary (threshold not met)
+        if: steps.skip_check.outputs.skip != 'true' && steps.threshold.outputs.should_run != 'true'
+        run: |
+          echo "### 📊 gitlearn" >> $GITHUB_STEP_SUMMARY
+          echo "Threshold not met: ${{ steps.threshold.outputs.pr_count }}/${{ env.GITLEARN_BATCH_SIZE }} PRs" >> $GITHUB_STEP_SUMMARY
+          echo "Next run after ${{ env.GITLEARN_BATCH_SIZE }} merged PRs since last tag." >> $GITHUB_STEP_SUMMARY
+
+  extract-insights:
+    needs: check-threshold
+    if: needs.check-threshold.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Configure provider
+        id: config
+        run: |
+          if [ -n "${{ secrets.ANTHROPIC_API_KEY }}" ]; then
+            echo "provider=anthropic" >> $GITHUB_OUTPUT
+            echo "model=${GITLEARN_MODEL:-anthropic/claude-sonnet-4-20250514}" >> $GITHUB_OUTPUT
+            echo "api_key_var=ANTHROPIC_API_KEY" >> $GITHUB_OUTPUT
+          elif [ -n "${{ secrets.OPENAI_API_KEY }}" ]; then
+            echo "provider=openai" >> $GITHUB_OUTPUT
+            echo "model=${GITLEARN_MODEL:-openai/gpt-4o}" >> $GITHUB_OUTPUT
+            echo "api_key_var=OPENAI_API_KEY" >> $GITHUB_OUTPUT
+          elif [ -n "${{ secrets.OPENROUTER_API_KEY }}" ]; then
+            echo "provider=openrouter" >> $GITHUB_OUTPUT
+            echo "model=${GITLEARN_MODEL:-openrouter/anthropic/claude-sonnet-4}" >> $GITHUB_OUTPUT
+            echo "api_key_var=OPENROUTER_API_KEY" >> $GITHUB_OUTPUT
+          else
+            echo "::error::No API key found. Add ANTHROPIC_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY"
+            exit 1
+          fi
+
+      - name: Setup context files (symlink)
+        id: setup
+        run: |
+          # Handle claude.md and agents.md symlink setup
+          if [ ! -f claude.md ] && [ ! -f agents.md ]; then
+            # Case 1: Neither exists - create template
+            echo "Creating initial claude.md with template"
+            cat > claude.md << 'TEMPLATE'
+          # Project Context
+
+          > Auto-maintained by [gitlearn](https://github.com/Nisarg38/gitlearn).
+          > Human-reviewed before merge.
+
+          <!-- gitlearn:meta
+          last_run: never
+          -->
+
+          ## Architecture
+
+          <!-- System design, key patterns, data flow -->
+
+          ## Business Logic
+
+          <!-- Domain-specific rules, workflows, constraints -->
+
+          ## Conventions
+
+          <!-- Team standards, naming patterns, file organization -->
+
+          ## Gotchas & Warnings
+
+          <!-- Non-obvious behaviors, common mistakes -->
+
+          ## Tools & Dependencies
+
+          <!-- Non-standard library usage, configuration patterns -->
+
+          ---
+
+          ## Changelog
+
+          <!-- Recent updates -->
+          TEMPLATE
+            ln -s claude.md agents.md
+            echo "created=true" >> $GITHUB_OUTPUT
+
+          elif [ ! -f claude.md ] && [ -f agents.md ] && [ ! -L agents.md ]; then
+            # Case 3: Only agents.md exists as regular file
+            echo "Moving agents.md to claude.md"
+            mv agents.md claude.md
+            ln -s claude.md agents.md
+            echo "created=true" >> $GITHUB_OUTPUT
+
+          elif [ -f claude.md ] && [ -f agents.md ] && [ ! -L agents.md ]; then
+            # Case 4: Both exist as regular files - need merge
+            echo "Both files exist, will merge"
+            echo "needs_merge=true" >> $GITHUB_OUTPUT
+
+          elif [ -f claude.md ] && [ ! -e agents.md ]; then
+            # Case 2: Only claude.md exists
+            echo "Creating agents.md symlink"
+            ln -s claude.md agents.md
+            echo "created=true" >> $GITHUB_OUTPUT
+
+          else
+            # Case 5: Already properly set up
+            echo "Context files already configured"
+            echo "created=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install OpenCode
+        run: |
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> $GITHUB_PATH
+
+      - name: Collect PR data
+        if: needs.check-threshold.outputs.is_bootstrap != 'true'
+        id: collect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBERS="${{ needs.check-threshold.outputs.pr_numbers }}"
+
+          if [ -z "$PR_NUMBERS" ]; then
+            echo "No PRs to process"
+            echo "pr_data=" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          echo "prs<<EOF" >> $GITHUB_OUTPUT
-          echo "$FILTERED_PRS" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          echo "skip=false" >> $GITHUB_OUTPUT
+          PR_DATA=""
 
-      - name: Configure
-        if: steps.skip.outputs.skip != 'true' && steps.collect.outputs.skip != 'true'
+          for PR_NUM in ${PR_NUMBERS//,/ }; do
+            echo "Collecting data for PR #$PR_NUM..."
+
+            # Get PR metadata
+            PR_INFO=$(gh pr view "$PR_NUM" --json title,body,author,mergedAt)
+            TITLE=$(echo "$PR_INFO" | jq -r '.title')
+            BODY=$(echo "$PR_INFO" | jq -r '.body // "No description"' | head -c 2000)
+            AUTHOR=$(echo "$PR_INFO" | jq -r '.author.login')
+            MERGED_AT=$(echo "$PR_INFO" | jq -r '.mergedAt')
+
+            # Get PR diff (truncated)
+            DIFF=$(gh pr diff "$PR_NUM" 2>/dev/null | head -c 10000 || echo "Diff unavailable")
+
+            # Get PR comments
+            COMMENTS=$(gh api "repos/${{ github.repository }}/issues/$PR_NUM/comments" --jq '.[].body' 2>/dev/null | head -c 1000 || echo "")
+
+            # Get review comments
+            REVIEWS=$(gh api "repos/${{ github.repository }}/pulls/$PR_NUM/comments" --jq '.[].body' 2>/dev/null | head -c 1000 || echo "")
+
+            PR_DATA="$PR_DATA
+          ---
+
+          ## PR #$PR_NUM: $TITLE
+
+          **Author:** $AUTHOR
+          **Merged:** $MERGED_AT
+
+          ### Description
+          $BODY
+
+          ### Discussion
+          $COMMENTS
+          $REVIEWS
+
+          ### Changes
+          \`\`\`diff
+          $DIFF
+          \`\`\`
+          "
+          done
+
+          # Write to file to avoid shell escaping issues
+          echo "$PR_DATA" > /tmp/pr_data.md
+          echo "pr_data_file=/tmp/pr_data.md" >> $GITHUB_OUTPUT
+
+      - name: Prepare agent prompt
+        id: prompt
         run: |
-          if [ -n "$GITLEARN_API_BASE" ]; then
-            PROVIDER="custom"; API_KEY="${OPENAI_API_KEY:-${ANTHROPIC_API_KEY:-$OPENROUTER_API_KEY}}"
-            MODEL="${GITLEARN_MODEL:-gpt-4o}"; THINKING=""
-          elif [ -n "$ANTHROPIC_API_KEY" ]; then
-            PROVIDER="anthropic"; API_KEY="$ANTHROPIC_API_KEY"
-            MODEL="${GITLEARN_MODEL:-claude-sonnet-4-5-20250929}"; THINKING="${GITLEARN_THINKING_BUDGET:-10000}"
-          elif [ -n "$OPENAI_API_KEY" ]; then
-            PROVIDER="openai"; API_KEY="$OPENAI_API_KEY"
-            MODEL="${GITLEARN_MODEL:-gpt-5.2-codex}"; THINKING=""
-          elif [ -n "$OPENROUTER_API_KEY" ]; then
-            PROVIDER="openrouter"; API_KEY="$OPENROUTER_API_KEY"
-            MODEL="${GITLEARN_MODEL:-moonshotai/kimi-k2.5}"; THINKING=""
+          IS_BOOTSTRAP="${{ needs.check-threshold.outputs.is_bootstrap }}"
+          PR_COUNT="${{ needs.check-threshold.outputs.pr_count }}"
+
+          if [ "$IS_BOOTSTRAP" = "true" ]; then
+            MAX_ITER="${{ env.GITLEARN_BOOTSTRAP_ITERATIONS }}"
+            PROMPT_TYPE="bootstrap"
           else
-            echo "::error::No API key. Add ANTHROPIC_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY"
-            exit 1
-          fi
-          echo "PROVIDER=$PROVIDER" >> $GITHUB_ENV
-          echo "MODEL=$MODEL" >> $GITHUB_ENV
-          echo "THINKING=$THINKING" >> $GITHUB_ENV
-          echo "MAX_TOKENS=${GITLEARN_MAX_TOKENS:-2048}" >> $GITHUB_ENV
-          echo "::add-mask::$API_KEY"
-          echo "API_KEY=$API_KEY" >> $GITHUB_ENV
-
-      - name: Setup context files
-        if: steps.skip.outputs.skip != 'true' && steps.collect.outputs.skip != 'true'
-        id: setup
-        run: |
-          if [ ! -f claude.md ] && [ ! -f agents.md ]; then
-            echo -e "# Project Context\n\n## Learnings" > claude.md
-            ln -s claude.md agents.md
-            echo "changes=true" >> $GITHUB_OUTPUT
-          elif [ ! -f claude.md ] && [ -f agents.md ]; then
-            mv agents.md claude.md && ln -s claude.md agents.md
-            echo "changes=true" >> $GITHUB_OUTPUT
-          elif [ -f agents.md ] && [ ! -L agents.md ]; then
-            echo "merge=true" >> $GITHUB_OUTPUT
-          elif [ ! -e agents.md ]; then
-            ln -s claude.md agents.md
-            echo "changes=true" >> $GITHUB_OUTPUT
+            MAX_ITER="${{ env.GITLEARN_MAX_ITERATIONS }}"
+            PROMPT_TYPE="regular"
           fi
 
-      - name: Merge existing files
-        if: steps.skip.outputs.skip != 'true' && steps.collect.outputs.skip != 'true' && steps.setup.outputs.merge == 'true'
-        run: |
-          PROMPT="Merge these two AI context files into one. Remove duplicates, keep all unique information.
+          echo "max_iterations=$MAX_ITER" >> $GITHUB_OUTPUT
+          echo "prompt_type=$PROMPT_TYPE" >> $GITHUB_OUTPUT
 
-=== claude.md ===
-$(cat claude.md)
-
-=== agents.md ===
-$(cat agents.md)
-
-Output ONLY the merged markdown content."
-
-          if [ "$PROVIDER" = "anthropic" ]; then
-            REQUEST=$(jq -n --arg m "$MODEL" --arg p "$PROMPT" '{model:$m,max_tokens:8192,messages:[{role:"user",content:$p}]}')
-            RESULT=$(curl -sf https://api.anthropic.com/v1/messages \
-              -H "x-api-key: $API_KEY" -H "anthropic-version: 2023-06-01" -H "content-type: application/json" \
-              -d "$REQUEST" | jq -r '.content | map(select(.type=="text")) | .[0].text // empty')
-          else
-            case "$PROVIDER" in
-              openai) EP="https://api.openai.com/v1/chat/completions" ;;
-              openrouter) EP="https://openrouter.ai/api/v1/chat/completions" ;;
-              custom) EP="${GITLEARN_API_BASE}/chat/completions" ;;
-            esac
-            REQUEST=$(jq -n --arg m "$MODEL" --arg p "$PROMPT" '{model:$m,max_tokens:8192,messages:[{role:"user",content:$p}]}')
-            RESULT=$(curl -sf "$EP" -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
-              -d "$REQUEST" | jq -r '.choices[0].message.content // empty')
-          fi
-          [ -n "$RESULT" ] && echo "$RESULT" > claude.md
-          rm -f agents.md && ln -s claude.md agents.md
-
-      - name: Generate learning (single PR)
-        if: steps.skip.outputs.skip != 'true' && github.event_name == 'pull_request'
-        id: learn
+      - name: Run OpenCode agent (Bootstrap)
+        if: needs.check-threshold.outputs.is_bootstrap == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
-          # Get full existing context
-          EXISTING_CLAUDE=""
-          [ -f claude.md ] && EXISTING_CLAUDE=$(cat claude.md)
+          opencode run --model "${{ steps.config.outputs.model }}" "
+          # gitlearn Bootstrap Analysis
 
-          PR_DIFF=$(gh pr diff ${{ github.event.pull_request.number }} --repo ${{ github.repository }} 2>/dev/null | head -c 15000 || echo "")
+          You are gitlearn, an AI that maintains repository context files. This is the FIRST run on this repository - perform a comprehensive analysis.
 
-          PROMPT='You are an expert at extracting valuable learnings from code changes for AI coding assistants.
+          ## Your Mission
+          Analyze this entire codebase and create meaningful documentation in claude.md that would help a developer (or AI assistant) unfamiliar with this repository.
 
-## Task
-Analyze this merged PR and extract 1-3 lines of context that would help an AI assistant working on this codebase in the future.
+          ## Process
 
-## What makes a GOOD learning:
-- Architectural decisions: "Uses event sourcing for order state"
-- Non-obvious conventions: "All API routes must use zod validation middleware"
-- Gotchas: "Redis keys expire after 24h - do not cache user sessions longer"
-- Important patterns: "Background jobs use BullMQ, see src/jobs/"
-- Integration details: "Stripe webhooks require signature verification in production"
+          1. **Explore the codebase structure**
+             - List directories and understand the organization
+             - Read key files: README, package.json/pyproject.toml/go.mod, main entry points
+             - Identify the tech stack and frameworks
 
-## What to SKIP (output NONE):
-- Obvious code changes (adding a button, fixing typos)
-- Version bumps or dependency updates
-- Test additions without architectural significance
-- Refactoring that does not change behavior
-- Documentation-only changes
+          2. **Identify patterns and architecture**
+             - How is the code organized?
+             - What are the main components/modules?
+             - How do they interact?
 
-## Format
-Output a markdown snippet (1-3 lines, can include a ### header if starting new section).
-Or output exactly: NONE
+          3. **Document repo-specific insights**
+             Focus ONLY on things specific to THIS repo:
+             - Business logic rules (domain-specific)
+             - Architectural decisions (and their rationale if visible)
+             - Team conventions (not obvious from code alone)
+             - Gotchas and warnings (things that will trip people up)
+             - Tool/library usage patterns (non-standard configurations)
 
-## Existing Context (DO NOT REPEAT)
-'"$EXISTING_CLAUDE"'
+          4. **Update claude.md**
+             - Read the existing template in claude.md
+             - Fill in each section with discovered insights
+             - Update the gitlearn:meta comment with current timestamp
+             - Keep it concise - quality over quantity
 
-## PR Details
-Title: ${{ github.event.pull_request.title }}
-Description: ${{ github.event.pull_request.body }}
+          ## What to SKIP
+          - Common knowledge (everyone knows React uses components)
+          - Generic best practices (use meaningful variable names)
+          - Obvious patterns (API routes in /api folder)
+          - Version numbers and dependencies (unless usage is non-obvious)
 
-## Code Changes
-'"$PR_DIFF"
+          ## Important
+          - Make changes directly to claude.md
+          - Do NOT modify agents.md - it's a symlink to claude.md
+          - Be thorough but concise
+          "
 
-          if [ "$PROVIDER" = "anthropic" ]; then
-            if [ -n "$THINKING" ] && [ "$THINKING" != "0" ]; then
-              REQUEST=$(jq -n --arg m "$MODEL" --arg p "$PROMPT" --argjson t "$THINKING" \
-                '{model:$m,max_tokens:16384,thinking:{type:"enabled",budget_tokens:$t},messages:[{role:"user",content:$p}]}')
-            else
-              REQUEST=$(jq -n --arg m "$MODEL" --arg p "$PROMPT" --argjson mt "$MAX_TOKENS" \
-                '{model:$m,max_tokens:$mt,messages:[{role:"user",content:$p}]}')
-            fi
-            RESPONSE=$(curl -sf https://api.anthropic.com/v1/messages \
-              -H "x-api-key: $API_KEY" -H "anthropic-version: 2023-06-01" -H "content-type: application/json" \
-              -d "$REQUEST" 2>&1) || { echo "::error::API failed"; exit 1; }
-            SUGGESTION=$(echo "$RESPONSE" | jq -r '.content | map(select(.type=="text")) | .[0].text // "NONE"')
-          else
-            case "$PROVIDER" in
-              openai) ENDPOINT="https://api.openai.com/v1/chat/completions" ;;
-              openrouter) ENDPOINT="https://openrouter.ai/api/v1/chat/completions" ;;
-              custom) ENDPOINT="${GITLEARN_API_BASE}/chat/completions" ;;
-            esac
-            REQUEST=$(jq -n --arg m "$MODEL" --arg p "$PROMPT" --argjson mt "$MAX_TOKENS" \
-              '{model:$m,max_tokens:$mt,messages:[{role:"user",content:$p}]}')
-            RESPONSE=$(curl -sf "$ENDPOINT" \
-              -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
-              -H "HTTP-Referer: https://github.com/${{ github.repository }}" \
-              -d "$REQUEST" 2>&1) || { echo "::error::API failed"; exit 1; }
-            SUGGESTION=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "NONE"')
-          fi
-
-          [ -z "$SUGGESTION" ] && SUGGESTION="NONE"
-          echo "suggestion<<EOF" >> $GITHUB_OUTPUT
-          echo "$SUGGESTION" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Generate learning (weekly batch)
-        if: steps.skip.outputs.skip != 'true' && steps.collect.outputs.skip != 'true' && github.event_name != 'pull_request'
-        id: learn_batch
+      - name: Run OpenCode agent (PR Analysis)
+        if: needs.check-threshold.outputs.is_bootstrap != 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
-          # Get full existing context
-          EXISTING_CLAUDE=""
-          [ -f claude.md ] && EXISTING_CLAUDE=$(cat claude.md)
+          PR_DATA=$(cat /tmp/pr_data.md)
 
-          # Build combined PR info from collected PRs
-          PRS='${{ steps.collect.outputs.prs }}'
-          PR_SUMMARIES=""
-          PR_NUMBERS=""
+          opencode run --model "${{ steps.config.outputs.model }}" "
+          # gitlearn PR Analysis
 
-          while read -r pr; do
-            [ -z "$pr" ] && continue
-            NUM=$(echo "$pr" | jq -r '.number')
-            TITLE=$(echo "$pr" | jq -r '.title')
-            BODY=$(echo "$pr" | jq -r '.body // ""' | head -c 500)
-            PR_DIFF=$(gh pr diff "$NUM" --repo ${{ github.repository }} 2>/dev/null | head -c 5000 || echo "")
-            PR_SUMMARIES="$PR_SUMMARIES
+          You are gitlearn, an AI that maintains repository context files.
 
-### PR #$NUM: $TITLE
-$BODY
+          ## Your Mission
+          Analyze the recent merged PRs and update claude.md with insights that would help a developer (or AI assistant) unfamiliar with this codebase.
 
-\`\`\`diff
-$PR_DIFF
-\`\`\`
-"
-            PR_NUMBERS="$PR_NUMBERS#$NUM "
-          done < <(echo "$PRS" | jq -c '.[]')
+          ## PRs to Analyze
+          $PR_DATA
 
-          echo "pr_numbers=$PR_NUMBERS" >> $GITHUB_OUTPUT
+          ## Process
 
-          PROMPT='You are an expert at extracting valuable learnings from code changes for AI coding assistants.
+          1. **Read existing context**
+             - Open and read claude.md to understand what's already documented
+             - Note existing sections and content
 
-## Task
-Analyze these merged PRs from the past week and extract meaningful context (3-10 lines total) that would help an AI assistant working on this codebase in the future.
+          2. **Analyze each PR deeply**
+             - Read the diff to see what changed
+             - Explore related files in the codebase to understand WHY
+             - Consider the PR description and discussion comments
+             - Look for patterns, decisions, conventions
 
-## What makes a GOOD learning:
-- Architectural decisions: "Uses event sourcing for order state"
-- Non-obvious conventions: "All API routes must use zod validation middleware"
-- Gotchas: "Redis keys expire after 24h - do not cache user sessions longer"
-- Important patterns: "Background jobs use BullMQ, see src/jobs/"
-- Integration details: "Stripe webhooks require signature verification in production"
+          3. **Extract valuable insights**
+             Focus ONLY on things specific to THIS repo:
+             - Business logic rules (domain-specific)
+             - Architectural decisions (and their rationale)
+             - Team conventions (not obvious from code alone)
+             - Gotchas and warnings (things that will trip people up)
+             - Tool/library usage patterns (non-standard configurations)
 
-## What to SKIP:
-- Obvious code changes (adding a button, fixing typos)
-- Version bumps or dependency updates
-- Test additions without architectural significance
-- Refactoring that does not change behavior
-- Documentation-only changes
+          4. **Update claude.md intelligently**
+             - Add new insights under appropriate sections
+             - Deduplicate - don't repeat what's already documented
+             - Update outdated info if code has changed
+             - Reorganize if content is in wrong section
+             - Update the gitlearn:meta comment with current timestamp
+             - Add entry to Changelog section with PR numbers
+             - Keep it concise - quality over quantity
 
-## Format
-Output a markdown snippet with learnings. Group related learnings under ### headers if appropriate.
-If no meaningful learnings from any PR, output exactly: NONE
+          ## What to SKIP
+          - Common knowledge (everyone knows React uses components)
+          - Generic best practices (use meaningful variable names)
+          - Obvious patterns (API routes in /api folder)
+          - Bug fixes without architectural significance
+          - Typo corrections or minor refactors
 
-## Existing Context (DO NOT REPEAT)
-'"$EXISTING_CLAUDE"'
+          ## Important
+          - Make changes directly to claude.md
+          - Do NOT modify agents.md - it's a symlink to claude.md
+          - If no meaningful insights from the PRs, just update the meta timestamp
+          "
 
-## PRs from this week
-'"$PR_SUMMARIES"
-
-          if [ "$PROVIDER" = "anthropic" ]; then
-            if [ -n "$THINKING" ] && [ "$THINKING" != "0" ]; then
-              REQUEST=$(jq -n --arg m "$MODEL" --arg p "$PROMPT" --argjson t "$THINKING" \
-                '{model:$m,max_tokens:16384,thinking:{type:"enabled",budget_tokens:$t},messages:[{role:"user",content:$p}]}')
-            else
-              REQUEST=$(jq -n --arg m "$MODEL" --arg p "$PROMPT" --argjson mt "$MAX_TOKENS" \
-                '{model:$m,max_tokens:$mt,messages:[{role:"user",content:$p}]}')
-            fi
-            RESPONSE=$(curl -sf https://api.anthropic.com/v1/messages \
-              -H "x-api-key: $API_KEY" -H "anthropic-version: 2023-06-01" -H "content-type: application/json" \
-              -d "$REQUEST" 2>&1) || { echo "::error::API failed"; exit 1; }
-            SUGGESTION=$(echo "$RESPONSE" | jq -r '.content | map(select(.type=="text")) | .[0].text // "NONE"')
+      - name: Check for changes
+        id: changes
+        run: |
+          if git diff --quiet claude.md; then
+            echo "No changes to claude.md"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
           else
-            case "$PROVIDER" in
-              openai) ENDPOINT="https://api.openai.com/v1/chat/completions" ;;
-              openrouter) ENDPOINT="https://openrouter.ai/api/v1/chat/completions" ;;
-              custom) ENDPOINT="${GITLEARN_API_BASE}/chat/completions" ;;
-            esac
-            REQUEST=$(jq -n --arg m "$MODEL" --arg p "$PROMPT" --argjson mt "$MAX_TOKENS" \
-              '{model:$m,max_tokens:$mt,messages:[{role:"user",content:$p}]}')
-            RESPONSE=$(curl -sf "$ENDPOINT" \
-              -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
-              -H "HTTP-Referer: https://github.com/${{ github.repository }}" \
-              -d "$REQUEST" 2>&1) || { echo "::error::API failed"; exit 1; }
-            SUGGESTION=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "NONE"')
+            echo "Changes detected in claude.md"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
           fi
 
-          [ -z "$SUGGESTION" ] && SUGGESTION="NONE"
-          echo "suggestion<<EOF" >> $GITHUB_OUTPUT
-          echo "$SUGGESTION" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+      - name: Create git tag
+        if: steps.changes.outputs.has_changes == 'true'
+        run: |
+          TAG_NAME="gitlearn-run-$(date +%Y%m%d-%H%M%S)"
+          git tag "$TAG_NAME"
+          echo "Created tag: $TAG_NAME"
+          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
 
-      - name: Update context PR (single PR)
-        if: steps.skip.outputs.skip != 'true' && github.event_name == 'pull_request' && steps.learn.outputs.suggestion != 'NONE' && !contains(steps.learn.outputs.suggestion, 'NONE')
+      - name: Commit and push
+        if: steps.changes.outputs.has_changes == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "gitlearn[bot]"
           git config user.email "gitlearn[bot]@users.noreply.github.com"
 
-          # Find existing open gitlearn PR
-          EXISTING_PR=$(gh pr list --state open --json number,headRefName --jq '.[] | select(.headRefName | startswith("gitlearn/")) | .headRefName' | head -1)
+          # Check for existing open gitlearn PR
+          EXISTING_PR=$(gh pr list --state open --label "gitlearn" --json number,headRefName --jq '.[0].headRefName // empty')
 
           if [ -n "$EXISTING_PR" ]; then
-            # Append to existing PR branch
+            echo "Found existing gitlearn PR branch: $EXISTING_PR"
             BRANCH="$EXISTING_PR"
             git fetch origin "$BRANCH"
             git checkout "$BRANCH"
             git pull origin "$BRANCH" --rebase || git pull origin "$BRANCH"
           else
-            # Create new branch with incrementing number
-            LAST_NUM=$(git branch -r | grep -oE 'gitlearn/context-[0-9]+' | grep -oE '[0-9]+' | sort -n | tail -1)
-            NEXT_NUM=$((${LAST_NUM:-0} + 1))
-            BRANCH="gitlearn/context-$NEXT_NUM"
+            echo "Creating new branch"
+            BRANCH="gitlearn/insights-$(date +%Y%m%d)"
             git checkout -b "$BRANCH"
           fi
 
-          # Apply setup changes if any
-          [ "${{ steps.setup.outputs.changes }}" = "true" ] || [ "${{ steps.setup.outputs.merge }}" = "true" ] && git add claude.md agents.md 2>/dev/null || true
-
-          # Append learning
-          echo "" >> claude.md
-          echo "<!-- PR #${{ github.event.pull_request.number }} -->" >> claude.md
-          echo '${{ steps.learn.outputs.suggestion }}' >> claude.md
-
+          # Stage and commit
           git add claude.md agents.md
-          git commit -m "📚 #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}" || exit 0
 
-          # Push (retry with new branch if conflict)
-          if ! git push origin "$BRANCH" 2>/dev/null; then
-            LAST_NUM=$(git branch -r | grep -oE 'gitlearn/context-[0-9]+' | grep -oE '[0-9]+' | sort -n | tail -1)
-            NEXT_NUM=$((${LAST_NUM:-0} + 1))
-            NEW_BRANCH="gitlearn/context-$NEXT_NUM"
-            git checkout -b "$NEW_BRANCH"
-            git push origin "$NEW_BRANCH"
-            BRANCH="$NEW_BRANCH"
+          IS_BOOTSTRAP="${{ needs.check-threshold.outputs.is_bootstrap }}"
+          PR_NUMBERS="${{ needs.check-threshold.outputs.pr_numbers }}"
+
+          if [ "$IS_BOOTSTRAP" = "true" ]; then
+            COMMIT_MSG="🚀 gitlearn: Bootstrap repository context"
+          else
+            COMMIT_MSG="📚 gitlearn: Extract insights from PRs #${PR_NUMBERS//,/, #}"
           fi
 
-          # Create PR if needed (with optional reviewer)
-          if ! gh pr list --head "$BRANCH" --state open --json number | jq -e '.[0]' >/dev/null 2>&1; then
-            REVIEWER_FLAG=""
-            [ -n "$GITLEARN_REVIEWER" ] && REVIEWER_FLAG="--reviewer $GITLEARN_REVIEWER"
-            gh pr create --title "🤖 Context Updates" \
-              --body "Auto-accumulated learnings from merged PRs. Review and merge when ready." \
-              --head "$BRANCH" --base main --label "gitlearn" $REVIEWER_FLAG 2>/dev/null || \
-            gh pr create --title "🤖 Context Updates" --body "Accumulated learnings." --head "$BRANCH" --base main
-          fi
+          git commit -m "$COMMIT_MSG" || {
+            echo "No changes to commit"
+            exit 0
+          }
 
-          # Summary
-          echo "### 📚 gitlearn" >> $GITHUB_STEP_SUMMARY
-          echo "**PR #${{ github.event.pull_request.number }}**: ${{ github.event.pull_request.title }}" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo '${{ steps.learn.outputs.suggestion }}' >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          # Push branch and tag
+          git push origin "$BRANCH" -u || git push origin "$BRANCH" --force-with-lease
+          git push origin "$TAG_NAME"
 
-      - name: Update context PR (weekly batch)
-        if: steps.skip.outputs.skip != 'true' && steps.collect.outputs.skip != 'true' && github.event_name != 'pull_request' && steps.learn_batch.outputs.suggestion != 'NONE' && !contains(steps.learn_batch.outputs.suggestion, 'NONE')
+          echo "BRANCH=$BRANCH" >> $GITHUB_ENV
+
+      - name: Create or update PR
+        if: steps.changes.outputs.has_changes == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git config user.name "gitlearn[bot]"
-          git config user.email "gitlearn[bot]@users.noreply.github.com"
+          IS_BOOTSTRAP="${{ needs.check-threshold.outputs.is_bootstrap }}"
+          PR_NUMBERS="${{ needs.check-threshold.outputs.pr_numbers }}"
+          PR_COUNT="${{ needs.check-threshold.outputs.pr_count }}"
 
-          # Create new branch for weekly batch
-          WEEK=$(date +%Y-W%V)
-          BRANCH="gitlearn/weekly-$WEEK"
+          # Check if PR already exists for this branch
+          EXISTING_PR_NUM=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
 
-          # Check if branch already exists
-          if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
-            git fetch origin "$BRANCH"
-            git checkout "$BRANCH"
-            git pull origin "$BRANCH" --rebase || git pull origin "$BRANCH"
-          else
-            git checkout -b "$BRANCH"
-          fi
+          if [ -n "$EXISTING_PR_NUM" ]; then
+            echo "PR #$EXISTING_PR_NUM already exists, it will be updated automatically"
 
-          # Apply setup changes if any
-          [ "${{ steps.setup.outputs.changes }}" = "true" ] || [ "${{ steps.setup.outputs.merge }}" = "true" ] && git add claude.md agents.md 2>/dev/null || true
-
-          # Append learning with week marker
-          echo "" >> claude.md
-          echo "<!-- Weekly batch: $WEEK - PRs: ${{ steps.learn_batch.outputs.pr_numbers }} -->" >> claude.md
-          echo '${{ steps.learn_batch.outputs.suggestion }}' >> claude.md
-
-          git add claude.md agents.md
-          git commit -m "📚 Weekly learnings: $WEEK" || exit 0
-
-          # Push
-          git push origin "$BRANCH" -u || git push origin "$BRANCH" --force-with-lease
-
-          # Create or update PR with reviewer assignment
-          REVIEWER_FLAG=""
-          [ -n "$GITLEARN_REVIEWER" ] && REVIEWER_FLAG="--reviewer $GITLEARN_REVIEWER"
-
-          if ! gh pr list --head "$BRANCH" --state open --json number | jq -e '.[0]' >/dev/null 2>&1; then
-            gh pr create --title "🤖 Weekly Context Updates ($WEEK)" \
-              --body "Weekly batch of learnings from merged PRs. Review and merge when ready.
-
-**PRs included:** ${{ steps.learn_batch.outputs.pr_numbers }}" \
-              --head "$BRANCH" --base main --label "gitlearn" $REVIEWER_FLAG 2>/dev/null || \
-            gh pr create --title "🤖 Weekly Context Updates" --body "Weekly learnings batch." --head "$BRANCH" --base main
-          else
-            # Add reviewer to existing PR if configured
-            if [ -n "$GITLEARN_REVIEWER" ]; then
-              PR_NUM=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number')
-              gh pr edit "$PR_NUM" --add-reviewer "$GITLEARN_REVIEWER" 2>/dev/null || true
+            # Add reviewer if configured
+            if [ -n "${{ env.GITLEARN_REVIEWER }}" ]; then
+              gh pr edit "$EXISTING_PR_NUM" --add-reviewer "${{ env.GITLEARN_REVIEWER }}" 2>/dev/null || true
             fi
+
+            # Update PR body with new info
+            if [ "$IS_BOOTSTRAP" = "true" ]; then
+              BODY="Bootstrap analysis added to context files."
+            else
+              BODY="Added insights from PRs: #${PR_NUMBERS//,/, #}"
+            fi
+            gh pr comment "$EXISTING_PR_NUM" --body "$BODY"
+
+            PR_URL=$(gh pr view "$EXISTING_PR_NUM" --json url --jq '.url')
+          else
+            # Create new PR
+            if [ "$IS_BOOTSTRAP" = "true" ]; then
+              TITLE="🚀 gitlearn: Bootstrap Repository Context"
+              BODY="## Bootstrap Analysis
+
+          gitlearn has performed an initial analysis of this repository and created context documentation.
+
+          **What's included:**
+          - Architecture overview
+          - Business logic patterns
+          - Team conventions
+          - Potential gotchas
+
+          Please review and merge when satisfied."
+            else
+              TITLE="🤖 gitlearn: Context Updates"
+              BODY="## Context Updates
+
+          gitlearn has extracted insights from recent merged PRs.
+
+          **PRs analyzed:** #${PR_NUMBERS//,/, #}
+          **Total:** $PR_COUNT PRs
+
+          Please review the changes to \`claude.md\` and merge when satisfied."
+            fi
+
+            REVIEWER_FLAG=""
+            if [ -n "${{ env.GITLEARN_REVIEWER }}" ]; then
+              REVIEWER_FLAG="--reviewer ${{ env.GITLEARN_REVIEWER }}"
+            fi
+
+            PR_URL=$(gh pr create \
+              --title "$TITLE" \
+              --body "$BODY" \
+              --head "$BRANCH" \
+              --base main \
+              --label "gitlearn" \
+              $REVIEWER_FLAG 2>/dev/null || \
+              gh pr create --title "$TITLE" --body "$BODY" --head "$BRANCH" --base main)
           fi
 
-          # Summary
-          echo "### 📚 gitlearn (weekly)" >> $GITHUB_STEP_SUMMARY
-          echo "**Week:** $WEEK" >> $GITHUB_STEP_SUMMARY
-          echo "**PRs processed:** ${{ steps.learn_batch.outputs.pr_numbers }}" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo '${{ steps.learn_batch.outputs.suggestion }}' >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "PR_URL=$PR_URL" >> $GITHUB_ENV
 
-      - name: Summary (no learning - single PR)
-        if: steps.skip.outputs.skip != 'true' && github.event_name == 'pull_request' && (steps.learn.outputs.suggestion == 'NONE' || contains(steps.learn.outputs.suggestion, 'NONE'))
+      - name: Summary
+        if: always()
         run: |
+          IS_BOOTSTRAP="${{ needs.check-threshold.outputs.is_bootstrap }}"
+          PR_COUNT="${{ needs.check-threshold.outputs.pr_count }}"
+          PR_NUMBERS="${{ needs.check-threshold.outputs.pr_numbers }}"
+          HAS_CHANGES="${{ steps.changes.outputs.has_changes }}"
+
           echo "### 📚 gitlearn" >> $GITHUB_STEP_SUMMARY
-          echo "No meaningful learning from PR #${{ github.event.pull_request.number }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
 
-      - name: Summary (no learning - weekly)
-        if: steps.skip.outputs.skip != 'true' && steps.collect.outputs.skip != 'true' && github.event_name != 'pull_request' && (steps.learn_batch.outputs.suggestion == 'NONE' || contains(steps.learn_batch.outputs.suggestion, 'NONE'))
-        run: |
-          echo "### 📚 gitlearn (weekly)" >> $GITHUB_STEP_SUMMARY
-          echo "No meaningful learnings extracted from this week's PRs." >> $GITHUB_STEP_SUMMARY
+          if [ "$IS_BOOTSTRAP" = "true" ]; then
+            echo "**Mode:** Bootstrap (initial repository analysis)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Mode:** PR Analysis" >> $GITHUB_STEP_SUMMARY
+            echo "**PRs analyzed:** $PR_COUNT" >> $GITHUB_STEP_SUMMARY
+            echo "**PR numbers:** #${PR_NUMBERS//,/, #}" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$HAS_CHANGES" = "true" ]; then
+            echo "**Status:** ✅ Context updated" >> $GITHUB_STEP_SUMMARY
+            echo "**Tag:** \`$TAG_NAME\`" >> $GITHUB_STEP_SUMMARY
+            if [ -n "$PR_URL" ]; then
+              echo "**PR:** $PR_URL" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "**Status:** ℹ️ No meaningful insights extracted" >> $GITHUB_STEP_SUMMARY
+          fi
