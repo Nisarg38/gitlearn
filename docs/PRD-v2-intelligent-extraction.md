@@ -41,11 +41,12 @@ gitlearn v2 replaces the current weekly/per-PR trigger system with an intelligen
 
 ### Primary Goals
 
-1. **Trigger after N PRs** - Batch processing with configurable threshold
+1. **Trigger after N PRs** - Batch processing with configurable threshold (default: 10)
 2. **Deep agentic analysis** - AI explores full codebase context, not just diffs
 3. **Repo-specific extraction** - Only insights unique to THIS repository
 4. **Intelligent content management** - Merge, dedupe, reorganize, update
 5. **Multi-provider support** - OpenAI, Anthropic, OpenRouter via OpenCode
+6. **Symlinked context files** - `claude.md` as source, `agents.md` as symlink (always in sync)
 
 ### Non-Goals
 
@@ -59,13 +60,13 @@ gitlearn v2 replaces the current weekly/per-PR trigger system with an intelligen
 ## User Stories
 
 ### US-1: Automatic Batch Trigger
-> As a developer, I want gitlearn to automatically run after every 5 merged PRs, so I get timely context updates without per-PR overhead.
+> As a developer, I want gitlearn to automatically run after every 10 merged PRs, so I get timely context updates without per-PR overhead.
 
 **Acceptance Criteria:**
 - System tracks merged PRs using git tags
-- Triggers when count >= GITLEARN_BATCH_SIZE (default: 5)
-- Falls back to running if max days elapsed (default: 7)
+- Triggers when count >= GITLEARN_BATCH_SIZE (default: 10)
 - Manual trigger via workflow_dispatch always works
+- No time-based fallback (purely PR-count driven)
 
 ### US-2: Deep PR Analysis
 > As a developer, I want the AI to understand the full context of changes, not just the diff, so extracted insights are meaningful.
@@ -138,15 +139,15 @@ Example:    gitlearn-run-20250130-093045
 
 ```python
 should_run = (
-    pr_count_since_last_tag >= GITLEARN_BATCH_SIZE  # Default: 5
+    pr_count_since_last_tag >= GITLEARN_BATCH_SIZE  # Default: 10
     OR
-    days_since_last_tag >= GITLEARN_MAX_DAYS        # Default: 7
-    OR
-    is_manual_trigger
+    is_manual_trigger                                # workflow_dispatch
     OR
     is_first_run                                     # Bootstrap
 )
 ```
+
+**Note:** No time-based fallback. Runs are purely PR-count driven. Use manual trigger if needed before threshold.
 
 ### 2. PR Data Collection
 
@@ -276,7 +277,46 @@ Do NOT modify `agents.md` - it's a symlink.
 After making changes, briefly summarize what you added/changed.
 ```
 
-### 5. Structured claude.md Format
+### 5. Symlink Management (claude.md ↔ agents.md)
+
+**Principle:** One source of truth, multiple entry points.
+
+```
+claude.md  ← actual content (agent writes here)
+     ↑
+agents.md  → symlink to claude.md (never modified directly)
+```
+
+**Setup Logic:**
+
+```bash
+# Case 1: Neither file exists
+→ Create claude.md with template
+→ Create agents.md as symlink
+
+# Case 2: Only claude.md exists
+→ Create agents.md as symlink
+
+# Case 3: Only agents.md exists
+→ Rename to claude.md
+→ Create agents.md as symlink
+
+# Case 4: Both exist as regular files
+→ Merge contents intelligently
+→ Write to claude.md
+→ Replace agents.md with symlink
+
+# Case 5: Already properly symlinked
+→ No action needed
+```
+
+**Agent Instruction:**
+```
+Do NOT modify agents.md directly - it's a symlink.
+All changes go to claude.md only.
+```
+
+### 6. Structured claude.md Format
 
 ```markdown
 # Project Context
@@ -359,8 +399,7 @@ max_iterations: ${{ vars.GITLEARN_BOOTSTRAP_ITERATIONS || 100 }}
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `GITLEARN_BATCH_SIZE` | PRs needed to trigger run | `5` |
-| `GITLEARN_MAX_DAYS` | Max days between runs (fallback) | `7` |
+| `GITLEARN_BATCH_SIZE` | PRs needed to trigger run | `10` |
 | `GITLEARN_MAX_ITERATIONS` | Agent iteration limit | `50` |
 | `GITLEARN_BOOTSTRAP_ITERATIONS` | Iterations for first run | `100` |
 | `GITLEARN_MODEL` | Override AI model | Provider default |
@@ -380,20 +419,19 @@ max_iterations: ${{ vars.GITLEARN_BOOTSTRAP_ITERATIONS || 100 }}
 ┌─────────────────────────────────────────────────────────────────┐
 │  Check Threshold                                                 │
 │  ├─ Find last gitlearn-run-* tag                                │
-│  ├─ Count merged PRs since tag                                  │
-│  ├─ Calculate days since tag                                    │
+│  ├─ Count merged PRs since tag (excluding skip labels)          │
 │  └─ Decide: run now or wait?                                    │
 └─────────────────────────────────────────────────────────────────┘
                               │
                     ┌─────────┴─────────┐
                     │                   │
-              threshold met        threshold not met
+         count >= 10 (or bootstrap)   count < 10
                     │                   │
                     ▼                   ▼
 ┌──────────────────────────┐    ┌──────────────────┐
 │  Collect PR Data         │    │  Exit (no-op)    │
-│  ├─ Diffs                │    └──────────────────┘
-│  ├─ Descriptions         │
+│  ├─ Diffs                │    │  Log: "N/10 PRs" │
+│  ├─ Descriptions         │    └──────────────────┘
 │  ├─ Comments             │
 │  └─ Review comments      │
 └──────────────────────────┘
@@ -409,11 +447,13 @@ max_iterations: ${{ vars.GITLEARN_BOOTSTRAP_ITERATIONS || 100 }}
                     │
                     ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  Commit & Push                                                   │
+│  Commit & PR Management                                          │
 │  ├─ Create gitlearn-run-* tag                                   │
 │  ├─ Commit updated claude.md                                    │
-│  ├─ Push to gitlearn/insights-{date} branch                     │
-│  └─ Create/update PR for human review                           │
+│  ├─ Check: existing open gitlearn PR?                           │
+│  │   ├─ YES: Push to existing branch (append)                   │
+│  │   └─ NO:  Create new branch + new PR                         │
+│  └─ Assign reviewer (if configured)                             │
 └─────────────────────────────────────────────────────────────────┘
                     │
                     ▼
@@ -421,6 +461,28 @@ max_iterations: ${{ vars.GITLEARN_BOOTSTRAP_ITERATIONS || 100 }}
 │  Human Reviews PR                                                │
 │  └─ Merge when satisfied                                        │
 └─────────────────────────────────────────────────────────────────┘
+```
+
+### PR Management Logic
+
+```bash
+# Check for existing open gitlearn PR
+EXISTING_PR=$(gh pr list --state open --label "gitlearn" --json number,headRefName --jq '.[0]')
+
+if [ -n "$EXISTING_PR" ]; then
+    # Append to existing PR branch
+    BRANCH=$(echo "$EXISTING_PR" | jq -r '.headRefName')
+    git fetch origin "$BRANCH"
+    git checkout "$BRANCH"
+    # Agent makes changes, commit, push to same branch
+    # PR automatically updates
+else
+    # Create new branch and PR
+    BRANCH="gitlearn/insights-$(date +%Y%m%d)"
+    git checkout -b "$BRANCH"
+    # Agent makes changes, commit, push
+    gh pr create --title "🤖 Context Updates" --label "gitlearn" ...
+fi
 ```
 
 ---
@@ -465,7 +527,7 @@ max_iterations: ${{ vars.GITLEARN_BOOTSTRAP_ITERATIONS || 100 }}
 
 1. Update workflow file to new version
 2. Remove `GITLEARN_TRIGGER_MODE` variable if set
-3. Optionally set `GITLEARN_BATCH_SIZE` and `GITLEARN_MAX_DAYS`
+3. Optionally set `GITLEARN_BATCH_SIZE` (default: 10)
 4. First run will bootstrap or pick up from existing state
 
 ### Backward Compatibility
