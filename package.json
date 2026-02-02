@@ -1,0 +1,28 @@
+{
+  "name": "gitlearn",
+  "version": "1.0.0",
+  "description": "A tool for extracting and maintaining repository-specific knowledge for AI coding assistants",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Running tests...\" && exit 0",
+    "lint": "echo \"Running linter...\" && exit 0",
+    "build": "echo \"Building project...\" && exit 0"
+  },
+  "keywords": [
+    "ai",
+    "coding-assistant",
+    "knowledge-extraction",
+    "claude",
+    "github-action"
+  ],
+  "author": "gitlearn",
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "commander": "^12.0.0",
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "prettier": "^3.2.0"
+  }
+}
