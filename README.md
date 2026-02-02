@@ -2,7 +2,48 @@
 
 **Your codebase has a story. Let AI remember it.**
 
-gitlearn is a GitHub Action that learns from merged PRs and keeps your AI context files (`claude.md`, `agents.md`) fresh and in sync.
+gitlearn keeps your AI context files (`CLAUDE.md`, `AGENTS.md`) fresh and in sync—two ways:
+
+| Mode | When | How |
+|------|------|-----|
+| **Agent Skill** | Real-time during dev sessions | Detects patterns as you code |
+| **GitHub Action** | After PRs merge | Batch extracts from PR history |
+
+## Agent Skill (Real-time Learning)
+
+Install the skill to learn patterns during active development:
+
+```bash
+npx skills add Nisarg38/gitlearn
+```
+
+Works with **40+ agents**: Claude Code, Cursor, Windsurf, Copilot, Codex, and more.
+
+### What It Does
+
+As you code, gitlearn watches for:
+- **Corrections**: "no, we do X instead" → captures the lesson
+- **Architecture**: "we use repository pattern here" → documents it
+- **Conventions**: "files are kebab-case" → records the standard
+- **Gotchas**: "that API caches for 1 hour" → warns future you
+
+When detected, it spawns a **parallel verifier agent** that:
+1. Checks if the rule already exists
+2. Evaluates if it's truly repo-specific (not generic)
+3. Updates both `CLAUDE.md` and `AGENTS.md` (kept identical)
+4. Or does nothing—**"no update" is often the right call**
+
+### Philosophy
+
+- **Brutal filtering**: Generic advice gets rejected
+- **Less is more**: 10 surgical rules > 100 obvious ones
+- **Always in sync**: Both context files stay byte-for-byte identical
+
+---
+
+## GitHub Action (Batch Learning)
+
+Learn from merged PRs automatically:
 
 ## How It Works
 
