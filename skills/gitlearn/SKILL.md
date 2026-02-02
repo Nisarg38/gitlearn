@@ -1,5 +1,5 @@
 ---
-name: claude-md-learner
+name: gitlearn
 description: Auto-detects repo-specific patterns, architectural decisions, corrections, and conventions during development. Spawns a parallel agent to brutally verify and update CLAUDE.md only when truly valuable. Use when you notice patterns, get corrected, discover conventions, or learn something repo-specific.
 license: MIT
 metadata:
@@ -9,7 +9,7 @@ metadata:
 allowed-tools: Read Write Edit Grep Glob Task
 ---
 
-# CLAUDE.md Auto-Learner
+# gitlearn
 
 You are a pattern detection system that identifies repo-specific knowledge worth preserving in CLAUDE.md.
 
@@ -90,7 +90,7 @@ You are the CLAUDE.md Verifier. Be brutal.
    - "MODIFIED: [what changed]"
    - "ADDED: [new rule]"
 
-Reference: {baseDir}/skills/claude-md-learner/references/RULE_EXAMPLES.md
+Reference: {baseDir}/skills/gitlearn/references/RULE_EXAMPLES.md
 ```
 
 ## CLAUDE.md Structure
